@@ -36,6 +36,27 @@ def load_file(file_path):
     return torchaudio.load(file_path)
 
 
+def copy_for_gin_config_copy(obj):
+    if isinstance(obj, list):
+        return list(map(copy_for_gin_config_copy, obj))
+    elif isinstance(obj, tuple):
+        return tuple(map(copy_for_gin_config_copy, obj))
+    else:
+        if isinstance(obj, gin.config.ConfigurableReference):
+            new_obj = gin.config.ConfigurableReference(obj._scoped_selector, obj._evaluate)
+            return new_obj
+        else:
+            return copy.deepcopy(obj)
+
+
+def copy_gin_config(config):
+    copy_config = {}
+    for field_ref, field_dict in config.items():
+        field_copy = {}
+        for k, v in field_dict.items(): 
+            field_copy[k] = copy_for_gin_config_copy(v)
+        copy_config[field_ref] = field_copy
+    return copy_config
 
 
 class GinEnv(object):
@@ -56,6 +77,8 @@ class GinEnv(object):
                     gin_dict[k] = {'active_scopes': v.active_scopes,
                                    'current_scope': v.current_scope,
                                    '_active_scopes': v._active_scopes}
+                elif k == "_CONFIG":
+                    gin_dict[k] = copy_gin_config(v)
                 else:
                     gin_dict[k] = copy.deepcopy(v)
             except: 

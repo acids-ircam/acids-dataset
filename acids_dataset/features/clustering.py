@@ -41,7 +41,6 @@ def hash_from_clustering(dataset, feature, n_centroids, pca_target_dim=None, pca
         dataset.loader.writer.add_feature_hash(dataset.path, feature, feature_hash)
         dataset.loader.writer.append_to_feature_metadata(dataset.path, feature, {'cluster_for_hash': kmeans})
 
-    dataset.loader.update_database() 
     return kmeans
         
 

@@ -3,11 +3,12 @@ import re
 import yaml
 import os
 from absl import flags, app
+from pprint import pprint
 from pathlib import Path
 
 import sys
 import sys; sys.path.append(str(Path(__file__).parent.parent))
-from acids_dataset import get_writer_class_from_path, get_metadata_from_path, get_fragment_class_from_path
+from acids_dataset import get_loader_from_path, get_metadata_from_path, get_fragment_class_from_path
 
 def import_flags():
     flags.DEFINE_string('path', None, 'dataset path', required=True)
@@ -16,17 +17,27 @@ def import_flags():
     flags.DEFINE_multi_integer('idx', [], 'parses fragment with idx %s')
     flags.DEFINE_multi_string('key', [], 'parses fragment with key %s')
 
+
+separator = '-'*10
+
 def main(argv):
     FLAGS = flags.FLAGS
     dataset_path = Path(FLAGS.path)
-    writer_class = get_writer_class_from_path(FLAGS.path)
+    loader_class = get_loader_from_path(FLAGS.path)
+    env = loader_class.open(dataset_path)
+    print('environment parameters : ')
+    pprint(env.stat())
     metadata = get_metadata_from_path(FLAGS.path)
-    for k, v in metadata.items():
-        print(f"{k}: {v}")
+    print(separator)
+    print('metadata')
+    pprint(metadata)
+    # for k, v in metadata.items():
+    #     print(f"\t{k}: {v}")
+    # print('}')
     if FLAGS.files:
-        env = writer_class.open(dataset_path)
         with env.begin() as txn:
-            feature_hash = writer_class.get_feature_hash(txn)
+            feature_hash = loader_class.get_feature_hash(txn)
+            print(separator)
             print('files : ')
             metadata_keys = metadata['features']
             for i, (f, idx) in enumerate(feature_hash['original_path'].items()):
@@ -34,7 +45,7 @@ def main(argv):
             if FLAGS.check_metadata:
                 missing_metadata = {}
                 fragment_class = get_fragment_class_from_path(dataset_path)
-                for key, ae in writer_class.iter_fragments(txn, fragment_class):
+                for key, ae in loader_class.iter_fragments(txn, fragment_class):
                     for k in metadata_keys:
                         try:
                             ae.get_buffer(k)
@@ -51,7 +62,7 @@ def main(argv):
                     for k, v in missing_metadata.items():
                         print(f"{k}: {v} missing")
     if len(FLAGS.idx) > 0 or len(FLAGS.key) > 0:
-        loader = writer_class.loader(FLAGS.path)
+        loader = loader_class.loader(FLAGS.path)
         for i in FLAGS.idx : 
             print('\n--INDEX %d :'%i)
             try: 

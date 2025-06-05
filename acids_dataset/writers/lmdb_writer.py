@@ -1,4 +1,6 @@
 import os
+import subprocess
+import pdb
 import tempfile
 import pdb
 import logging
@@ -21,6 +23,9 @@ import yaml
 
 non_buffer_keys = ['feature_hash', 'feature_status', 'features', 'keygen']
 VERBOSE_PARSING = False
+
+def print_files(label): 
+    print(label, 'open files : ', len(os.listdir('/proc/self/fd')))
 
 @gin.configurable(module="writer")
 class LMDBWriter(object):
@@ -119,6 +124,10 @@ class LMDBWriter(object):
         feature_status = {f.feature_name: StatusBytes() for f in features}
         feature_status['waveform'] = StatusBytes()
         return feature_status
+
+    def open(self): 
+        return lmdb.open(str(self.output_path.resolve()), 
+                        map_size = int(self.max_db_size * 1024 ** 3))
     
     @staticmethod
     def get_feature_name(f):
@@ -241,8 +250,7 @@ class LMDBWriter(object):
 
     def build(self, compact: bool = False):
         """Builds the pre-processed database."""
-        env = lmdb.open(str(self.output_path.resolve()), 
-                        map_size = int(self.max_db_size * 1024 ** 3))
+        env = self.open()
         n_seconds = 0
         metadata = {}
         feature_hash = self._init_feature_hash()
@@ -542,8 +550,9 @@ class LMDBLoader(object):
         self._length = self._metadata.get('n_chunks')
         keygen_class = getattr((locals().get(self._metadata.get('writer_class')) or LMDBWriter), "KeyGenerator", KeyIterator)
         filter_keys = list(map(lambda x: keygen_class.from_str(x), non_buffer_keys))
-        self._database = self.open(db_path, readonly=True) 
-        with self._database.begin() as txn:
+        
+        print_files('init')
+        with self.database.begin() as txn:
             self._keys = list(filter(lambda x: x not in filter_keys, txn.cursor().iternext(values=False)))
             self._length = len(self._keys)
             keygen = txn.get('keygen'.encode('utf-8'))
@@ -564,7 +573,7 @@ class LMDBLoader(object):
         else:
             assert isinstance(idx, bytes), "__getitem__ must be either int or bytes"
             idx_key = idx
-        with self._database.begin() as txn:
+        with self.database.begin(write=False) as txn:
             fg = self._fragment_class(txn.get(idx_key), output_type=self._output_type)
         return fg
 
@@ -574,13 +583,13 @@ class LMDBLoader(object):
     def get_key_from_idx(self, idx: int):
         return self._keys[idx]
 
-    def open(self, path=None, readonly=True, lock=False):
+    def open(self, path=None, readonly=True, lock=True):
         if path is None: path = self._db_path
         return lmdb.open(str(path), lock=lock, readonly=readonly)
 
-    def update_database(self):
-        self._database.close()
-        self._database = self.open()
+    @property
+    def database(self):
+        return self.open(self._db_path, readonly=True) 
 
     @property
     def feature_status(self):
@@ -599,19 +608,19 @@ class LMDBLoader(object):
         return self._features
 
     def get_feature_hash(self, txn=None):
-        transaction = txn or self._database.begin()
+        transaction = txn or self.database.begin()
         feature_hash = dill.loads(transaction.get('feature_hash'.encode('utf-8'))) 
         if txn is None: transaction.__exit__()
         return feature_hash
 
     def get_features(self, txn=None):
-        transaction = txn or self._database.begin()
+        transaction = txn or self.database.begin()
         features = dill.loads(transaction.get('features'.encode('utf-8'))) 
         if txn is None: transaction.__exit__()
         return features 
 
     def iter_fragment_keys(self, as_bytes=True, txn=None):
-        transaction = txn or self._database.begin()
+        transaction = txn or self.database.begin()
         non_keys = list(map(self._keygen.from_str, non_buffer_keys))
         for key in transaction.cursor().iternext(values=False):
             if key not in non_keys:
@@ -630,9 +639,9 @@ class LMDBLoader(object):
         Yields:
             : key, fragment (Tuple[str, AcidsFragment]): key and fragments
         """
-        transaction = txn or self._database.begin()
+        transaction = txn or self.database.begin()
         non_keys = list(map(self._keygen.from_str, non_buffer_keys))
-        with self._database.begin(readonly=True) as txn:
+        with self.database.begin(readonly=True) as txn:
             for key in txn.cursor().iternext(values=False):
                 if key not in non_keys:
                     yield key, self._fragment_class(txn.get(key))

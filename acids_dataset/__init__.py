@@ -84,6 +84,12 @@ def get_features_from_path(path):
     writer_class = get_writer_class_from_path(path)
     return writer_class.loader(path).features
 
+def get_loader_class_from_path(path):
+    return get_writer_class_from_path(path).load
+
+def get_loader_from_path(path):
+    return get_writer_class_from_path(path).loader(path)
+
 def get_feature_names_from_path(path):
     writer_class = get_writer_class_from_path(path)
     return list(writer_class.loader(path).features.keys())

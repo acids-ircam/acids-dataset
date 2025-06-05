@@ -551,7 +551,6 @@ class LMDBLoader(object):
         keygen_class = getattr((locals().get(self._metadata.get('writer_class')) or LMDBWriter), "KeyGenerator", KeyIterator)
         filter_keys = list(map(lambda x: keygen_class.from_str(x), non_buffer_keys))
         
-        print_files('init')
         with self.database.begin() as txn:
             self._keys = list(filter(lambda x: x not in filter_keys, txn.cursor().iternext(values=False)))
             self._length = len(self._keys)

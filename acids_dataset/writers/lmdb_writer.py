@@ -22,10 +22,13 @@ import yaml
 
 
 non_buffer_keys = ['feature_hash', 'feature_status', 'features', 'keygen']
+VERBOSE = False
 VERBOSE_PARSING = False
 
 def print_files(label): 
-    print(label, 'open files : ', len(os.listdir('/proc/self/fd')))
+    if VERBOSE:
+        print(label, 'open files : ', len(os.listdir('/proc/self/fd')))
+    return
 
 @gin.configurable(module="writer")
 class LMDBWriter(object):
@@ -550,6 +553,7 @@ class LMDBLoader(object):
         self._length = self._metadata.get('n_chunks')
         keygen_class = getattr((locals().get(self._metadata.get('writer_class')) or LMDBWriter), "KeyGenerator", KeyIterator)
         filter_keys = list(map(lambda x: keygen_class.from_str(x), non_buffer_keys))
+        print_files("init")
         
         with self.database.begin() as txn:
             self._keys = list(filter(lambda x: x not in filter_keys, txn.cursor().iternext(values=False)))
@@ -565,6 +569,7 @@ class LMDBLoader(object):
         return self._length
 
     def __getitem__(self, idx: int | str| bytes):
+        print_files(f"open {idx}")
         if isinstance(idx, int):
             idx_key = self._keys[idx]
         elif isinstance(idx, str):
@@ -582,13 +587,14 @@ class LMDBLoader(object):
     def get_key_from_idx(self, idx: int):
         return self._keys[idx]
 
-    def open(self, path=None, readonly=True, lock=True):
+    def open(self, path=None, readonly=True, lock=False):
         if path is None: path = self._db_path
+        #print(path, lock, readonly)
         return lmdb.open(str(path), lock=lock, readonly=readonly)
 
     @property
     def database(self):
-        return self.open(self._db_path, readonly=True) 
+        return self.open()
 
     @property
     def feature_status(self):

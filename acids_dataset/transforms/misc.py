@@ -273,6 +273,7 @@ class FrequencyMasking(Transform):
             return input.shape[-1] == output.shape[-1]
         return [(cls(), is_out_ok)]
             
+@gin.configurable(module="transforms")
 class RandomEQ(Transform):
     """
     Random equalization. From Victor Shepardson's fork of RAVE (https://github.com/victor-shepardson/RAVE)
@@ -335,7 +336,7 @@ class RandomEQ(Transform):
         return [(cls(sr=44100), run_several_times)]
 
 
-
+@gin.configurable(module="transforms")
 class RandomDelay(Transform):
     takes_as_input = Transform.input_types.torch
     def __init__(self, max_delay:float=1024, **kwargs):
@@ -358,7 +359,7 @@ class RandomDelay(Transform):
         delayed = x[..., 1:-d_lo]*(1-l) + x[..., :-d_hi]*l
         mix = (random.random()*2-1)**3
         return mirror_pad(x[..., d_hi:] + delayed*mix, x.shape[-1])
-
+@gin.configurable(module="transforms")
 class RandomDistort(Transform):
     takes_as_input = Transform.input_types.numpy 
     def __init__(self, sr, max_drive=32, p_lp=0.75, p_bp=0.5, n_bp=2, p_ls=0.5, **kw):

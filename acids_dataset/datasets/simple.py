@@ -15,7 +15,9 @@ from .utils import _outs_from_pattern, _transform_outputs
 
 TransformType = Optional[transforms.Transform | List[transforms.Transform] | Dict[str, transforms.Transform]]
 
+
 def _parse_transforms_with_pattern(transform, pattern):
+    #TODO better pattern / transform check
     return transform
 
 class AudioDataset(torch.utils.data.Dataset):

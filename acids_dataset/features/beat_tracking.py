@@ -146,7 +146,7 @@ class BeatTrack(AcidsDatasetFeature):
             clock = data["beat"][slice(start, end)]
         return clock
 
-    def pre_chunk_hook(self, path, audio, sr):
+    def pre_chunk_hook(self, path, audio, sr, dataset_path):
         track_data = self.track_beat(audio_path=path, audio=audio, sr=sr)
         self._write_beat_tracking(path, track_data)
 

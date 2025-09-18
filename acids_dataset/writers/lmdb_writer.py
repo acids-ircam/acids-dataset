@@ -155,7 +155,7 @@ class LMDBWriter(object):
         return metadata_dict
 
     @staticmethod
-    def _extract_features(fragment, features, current_key, feature_hash, feature_status, overwrite=False):
+    def _extract_features(fragment, features, current_key, feature_hash, feature_status, dataset_path, overwrite=False):
         """extract features from a given fragment"""
         for feature in features:
             feature_name = feature.feature_name
@@ -224,7 +224,7 @@ class LMDBWriter(object):
                     current_key = next(key_generator)
                     n_seconds += float(fragment.get_metadata().get('length', '0'))
                     feature_hash['original_path'][str(current_file)].append(current_key)
-                    cls._extract_features(fragment, features, current_key, feature_hash, feature_status)
+                    cls._extract_features(fragment, features, current_key, feature_hash, feature_status, dataset_path)
                     txn.put(
                         current_key.encode(), 
                         fragment.serialize()

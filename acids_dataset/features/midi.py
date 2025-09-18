@@ -137,7 +137,7 @@ class AfterMIDI(AcidsDatasetFeature):
     def default_feature_name(self):
         return "midi"
 
-    def pre_chunk_hook(self, path, audio, sr):
+    def pre_chunk_hook(self, path, audio, sr, dataset_path):
         midi_data = self.get_midi(audio_path=path, audio=audio, sr=sr)
         self._write_midi_buffer(path, midi_data)
 

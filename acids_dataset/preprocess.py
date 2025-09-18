@@ -29,7 +29,7 @@ def import_flags():
     flags.DEFINE_multi_string('meta_regexp', [], help="additional regexp for metadata parsing")
     flags.DEFINE_multi_string('override', [], help="additional overridings for configs")
     flags.DEFINE_integer('sample_rate', 44100, help="sample rate")
-    flags.DEFINE_integer('channels', 1, help="number of audio channels")
+    flags.DEFINE_integer('channels', None, help="number of audio channels")
     flags.DEFINE_boolean('check', True, help="has interactive mode for data checking.")
     flags.DEFINE_boolean('force', False, help="force dataset preprocessing if folder already exists")
     flags.DEFINE_float('max_db_size', 100, help="maximum database size")
@@ -51,7 +51,7 @@ def preprocess_dataset(
     chunk_length: int = None,
     hop_length: int = None, 
     sample_rate = None,
-    channels = 1,
+    channels = None,
     flt = [],
     exclude = [],
     meta_regexp = [], 

@@ -11,6 +11,8 @@ from .datasets import get_available_datasets, get_dataset
 @pytest.mark.parametrize("output_pattern,transforms", [
     ("waveform", []),
     ("(waveform,)", [adt.Gain()]),
+    ("(waveform,)", [adt.Compose(adt.Gain(), adt.Gain())]),
+    ("(waveform,waveform)", [adt.Gain(), adt.Gain()]),
     ("(waveform[0],)", [adt.Gain()]),
     ("(waveform[:1],)", [adt.Gain()]),
     ("(waveform[0:],)", [adt.Gain()]),

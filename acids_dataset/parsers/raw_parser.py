@@ -36,12 +36,13 @@ class TorchaudioBackend(object):
                 raise FileNotReadException(audio_path, cls)
             if orig_sr != sr:
                 wav = torchaudio.functional.resample(wav, orig_sr, sr)
-            if wav.shape[0] > channels:
-                wav = wav[:channels]
-            elif wav.shape[0] < channels: 
-                wav = wav[torch.arange(channels)%wav.shape[0]]
+            if channels is not None:
+                if wav.shape[0] > channels:
+                    wav = wav[:channels]
+                elif wav.shape[0] < channels: 
+                    wav = wav[torch.arange(channels)%wav.shape[0]]
             for f in features:
-                if hasattr(f, "pre_chunk_hook"): f.pre_chunk_hook(audio_path, wav, sr)
+                if hasattr(f, "pre_chunk_hook"): f.pre_chunk_hook(audio_path, wav, sr, dataset_path)
             file_length = wav.shape[-1] / sr
             chunk_length_smp = int(chunk_length * sr)
             hop_length_smp = int(hop_length * sr)

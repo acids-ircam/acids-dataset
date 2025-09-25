@@ -39,7 +39,3 @@ class Loudness(AcidsDatasetFeature):
     def __call__(self, x):
         return loudness(x, self.sr)
         
-
-
-
-

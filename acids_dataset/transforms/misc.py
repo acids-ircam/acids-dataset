@@ -1,4 +1,5 @@
 import torch
+import pdb
 import math
 import random
 import gin
@@ -111,7 +112,22 @@ class Stretch(Transform):
         random_pitch = random.random() * (random_range[1] - random_range[0]) + random_range[0]
         x_pitched = self._pitch_signal(x, random_pitch)
         return x_pitched
-        
+
+@gin.configurable(module="transforms")
+class Log1p(Transform):
+    def __init__(self, contrast=1.0, p = 1.0, **kwargs):
+        super().__init__(p=p, **kwargs)
+        self.contrast = contrast
+    def apply(self, x):
+        return torch.log(1 + torch.clamp(x * self.contrast, 1e-5))
+
+@gin.configurable(module="transforms")
+class Exp1m(Transform):
+    def __init__(self, contrast=1.0, p = 1.0, **kwargs):
+        super().__init__(p=p, **kwargs)
+        self.contrast = contrast
+    def apply(self, x):
+        return torch.exp(x) / self.contrast - 1
 
 
 @gin.configurable(module="transforms")
@@ -119,10 +135,12 @@ class Crop(Transform):
     """
     Randomly crops signal to fit n_signal samples
     """
-    def __init__(self, n_signal: int | None = None, dim=-1, **kwargs):
+    def __init__(self, n_signal: int | None = None, dim=-1, pad_if_shorter=None, pad_dir="right", **kwargs):
         super().__init__(**kwargs)
         self.n_signal = n_signal
+        self.pad_if_shorter = pad_if_shorter
         self.dim = dim
+        self.pad_dir = pad_dir
 
     def apply_random(self, x):
         if random.random() < self.p:
@@ -130,7 +148,22 @@ class Crop(Transform):
         else:
             return x
 
+    def _pad(self, x):
+        missing_points = self.n_signal - x.shape[self.dim]
+        if self.pad_dir == "right": 
+            pad_dim = (0, missing_points)
+        elif self.pad_dir == "left": 
+            pad_dim = (missing_points, 0)
+        else:
+            pad_dim = (math.floor(missing_points)/2, math.ceil(missing_points)/2)
+        return torch.nn.functional.pad(x, pad_dim, mode=self.pad_if_shorter)
+
     def apply(self, x):
+        if x.shape[self.dim] < self.n_signal: 
+            if self.pad_if_shorter is None:
+                raise ValueError("cannot crop %s samples on dim %d: got %d"%(self.n_signal, self.dim,  x.shape[self.dim]))
+            else:
+                x = self._pad(x)
         in_point = random.randint(0, x.shape[self.dim] - self.n_signal)
         idx = [slice(None)] * len(x.shape); idx[self.dim] = slice(in_point, in_point + self.n_signal)
         return x.__getitem__(tuple(idx))

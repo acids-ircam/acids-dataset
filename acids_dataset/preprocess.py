@@ -61,45 +61,47 @@ def preprocess_dataset(
     device: str | None = None, 
     max_db_size: int = 100, 
     compact: bool = False, 
-    log: str | None = None
+    log: str | None = None, 
+    keep_gin_constants: bool = False
     ):
-    path = list(map(Path, checklist(path)))
-    import_database_configs(*path)
-    # parse features
-    features = features or []
-    out = out or get_default_output_path(path)
+    with GinEnv(keep_constants=keep_gin_constants):
+        path = list(map(Path, checklist(path)))
+        import_database_configs(*path)
+        # parse features
+        features = features or []
+        out = out or get_default_output_path(path)
 
-    if chunk_length:
-        set_gin_constant('CHUNK_LENGTH', chunk_length)
-        set_gin_constant('HOP_LENGTH', hop_length or chunk_length // 2)
-    if sample_rate: set_gin_constant('SAMPLE_RATE', sample_rate)
-    set_gin_constant('CHANNELS', channels)
-    set_gin_constant('DEVICE', device or "cpu")
+        if chunk_length:
+            set_gin_constant('CHUNK_LENGTH', chunk_length)
+            set_gin_constant('HOP_LENGTH', hop_length or chunk_length // 2)
+        if sample_rate: set_gin_constant('SAMPLE_RATE', sample_rate)
+        set_gin_constant('CHANNELS', channels)
+        set_gin_constant('DEVICE', device or "cpu")
 
-    if os.path.splitext(config)[-1] != ".gin":
-        config += ".gin"
-    gin.parse_config_files_and_bindings([config], override, finalize_config=False)
+        if os.path.splitext(config)[-1] != ".gin":
+            config += ".gin"
+        gin.parse_config_files_and_bindings([config], override, finalize_config=False)
 
-    # append additional features
-    operative_features = parse_features()
-    operative_features = append_meta_regexp(operative_features, meta_regexp=meta_regexp)
-    for i, f in enumerate(features):
-        if isinstance(f, str):
-            operative_features.extend(feature_from_gin_config(f))
-        elif isinstance(f, AcidsDatasetFeature):
-            operative_features.append(f)
+        # append additional features
+        operative_features = parse_features()
+        operative_features = append_meta_regexp(operative_features, meta_regexp=meta_regexp)
+        for i, f in enumerate(features):
+            if isinstance(f, str):
+                operative_features.extend(feature_from_gin_config(f))
+            elif isinstance(f, AcidsDatasetFeature):
+                operative_features.append(f)
 
-    gin.finalize() 
-    writer_class = get_writer_class(filters=flt, exclude=exclude)
-    writer = writer_class(path, 
-                        out, 
-                        features=operative_features, 
-                        check=check, 
-                        force=force, 
-                        waveform=waveform, 
-                        max_db_size=max_db_size, 
-                        log=log) 
-    writer.build(compact=compact)
+        gin.finalize() 
+        writer_class = get_writer_class(filters=flt, exclude=exclude)
+        writer = writer_class(path, 
+                            out, 
+                            features=operative_features, 
+                            check=check, 
+                            force=force, 
+                            waveform=waveform, 
+                            max_db_size=max_db_size, 
+                            log=log) 
+        writer.build(compact=compact)
 
 def main(argv):
 

@@ -148,25 +148,24 @@ class AcidsDatasetFeature(object):
     def read(self, fragment):
         return fragment.get_data(self.feature_name)
 
-    def __call__(self): 
+    def __call__(self, *args, **kwargs): 
         raise NotImplementedError()
         
 
 
 
 def check_feature_configs(module, path):
-    if not path.exists():
-        feature_class = getattr(module, "AcidsDatasetFeature")
-        feature_subclasses = get_subclasses_from_package(module, feature_class, exclude=["beat_this"])
-        os.makedirs(path, exist_ok=True)
-        for feature in feature_subclasses:
-            if feature == feature_class: continue
-            gin_config_name = feature.__name__.lower()
-            if hasattr(feature, "gin_configs"):
-                for config_name, config_str in feature.gin_configs.items(): 
-                    gin_config_path = (path / (gin_config_name + f"_{config_name}.gin")).resolve()
-                    feature.write_gin_config(gin_config_path, config_str)
-            else:
-                gin_config_path = (path / (gin_config_name + ".gin")).resolve()
-                if not gin_config_path.exists():
-                    feature.write_gin_config(gin_config_path)
+    feature_class = getattr(module, "AcidsDatasetFeature")
+    feature_subclasses = get_subclasses_from_package(module, feature_class, exclude=["beat_this"])
+    os.makedirs(path, exist_ok=True)
+    for feature in feature_subclasses:
+        if feature == feature_class: continue
+        gin_config_name = feature.__name__.lower()
+        if hasattr(feature, "gin_configs"):
+            for config_name, config_str in feature.gin_configs.items(): 
+                gin_config_path = (path / (gin_config_name + f"_{config_name}.gin")).resolve()
+                feature.write_gin_config(gin_config_path, config_str)
+        else:
+            gin_config_path = (path / (gin_config_name + ".gin")).resolve()
+            if not gin_config_path.exists():
+                feature.write_gin_config(gin_config_path)

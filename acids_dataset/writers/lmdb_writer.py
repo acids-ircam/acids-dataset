@@ -438,7 +438,7 @@ class LMDBWriter(object):
                     iterator = cls.iter_fragment_keys(txn) if not show_status else tqdm.tqdm(cls.iter_fragment_keys(txn), desc="computing feature %s"%f.feature_name, total=metadata['n_chunks'])
                     for key in iterator:
                         fragment = fragment_class(txn.get(key))
-                        needs_write = cls._extract_features(fragment, [f], key, feature_hash, feature_status, overwrite=overwrite)
+                        needs_write = cls._extract_features(fragment, [f], key, feature_hash, feature_status, path, overwrite=overwrite)
                         if needs_write:
                             txn.put(key, fragment.serialize())
 

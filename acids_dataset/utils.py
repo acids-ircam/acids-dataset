@@ -11,6 +11,7 @@ from pathlib import Path
 import random
 import math
 import torch
+import torch.nn.functional as F
 import torchaudio
 import gin
 
@@ -60,11 +61,12 @@ def copy_gin_config(config):
 
 
 class GinEnv(object):
-    def __init__(self, paths=[], configs=[], bindings=[], clear:bool = True):
+    def __init__(self, paths=[], configs=[], bindings=[], clear:bool = True, import_constants: bool = True, keep_constants: bool = False):
         self._paths = checklist(paths)
         self._configs = checklist(configs)
         self._bindings = checklist(bindings)
-        self.keep_constants = True
+        self.keep_constants = keep_constants
+        self.import_constants = import_constants
         self._dict = None
         self._clear = clear 
 
@@ -86,14 +88,14 @@ class GinEnv(object):
                     gin_dict[k] = dill.dumps(v)
                 except: 
                     gin_dict[k] = v
-        return gin_dict
+        return copy.deepcopy(gin_dict)
     
     def __enter__(self):
         self._dict = self._copy_gin_dict()
         if self._clear:
             gin.clear_config()
-        if self.keep_constants: 
-            gin.config._CONSTANTS = self._dict['_CONSTANTS']
+        if self.import_constants: 
+            gin.config._CONSTANTS = copy.copy(self._dict['_CONSTANTS'])
         for p in self._paths: 
             gin.add_config_file_search_path(p)
         if len(self._configs) or len(self._bindings):
@@ -101,26 +103,72 @@ class GinEnv(object):
         gin.unlock_config()
 
     def __exit__(self, *args):
-        gin.clear_config()
+        constants = gin.config._CONSTANTS.copy()
+        gin.clear_config(clear_constants=True)
         scope_manager = gin.config._ScopeManager()
         scope_manager.__dict__.update(self._dict['_SCOPE_MANAGER'])
         self._dict['_SCOPE_MANAGER'] = scope_manager
         for k, v in self._dict.items():
             if isinstance(v, bytes):
                 self._dict[k] = dill.loads(v)
+        if self.keep_constants: 
+            for k, v in constants._selector_map.items():
+                self._dict['_CONSTANTS']._selector_map[k] = v
+            for k, v in constants._selector_tree.items():
+                self._dict['_CONSTANTS']._selector_tree[k] = dict(v)
         gin.config.__dict__.update(self._dict)
 
 
-def loudness(waveform: torch.Tensor, sample_rate: int):
+def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None = None, keep_channels: bool = False):
     r"""
-    Custom extension of torchaudio loudness, allowing loudness computation for small chunks
-    """
+    Custom extension of torchaudio loudness, allowing loudness computation for small chunks.
 
+    Args:
+        waveform: input tensor of shape (..., channels, samples)
+        sample_rate: sample rate
+        frame_length: if given, split audio into non-overlapping frames of this length (in samples),
+                      padding the last frame if needed, and return per-frame loudness
+        keep_channels: if True, compute loudness per channel instead of combined LUFS
+
+    Returns:
+        Loudness tensor. Shape depends on arguments:
+          default:                   (...,)
+          frame_length only:         (..., num_frames)
+          keep_channels only:        (..., channels)
+          frame_length+keep_channels: (..., num_frames, channels)
+    """
     if not torch.is_tensor(waveform):
         waveform = torch.from_numpy(waveform)
 
-    if waveform.size(-2) > 5:
+    C = waveform.size(-2)
+    if C > 5:
         raise ValueError("Only up to 5 channels are supported.")
+
+    batch_shape = waveform.shape[:-2]
+    T = waveform.size(-1)
+    B = math.prod(batch_shape)  # 1 when there are no batch dims
+
+    # --- Frame splitting: pad to multiple of frame_length, unfold into frames ---
+    if frame_length is not None:
+        remainder = T % frame_length
+        if remainder != 0:
+            waveform = waveform[..., math.floor(waveform.shape[-1] / frame_length)]
+        # (..., C, T) -> (..., C, num_frames, frame_length)
+        waveform = waveform.unfold(-1, frame_length, frame_length)
+        num_frames = waveform.size(-2)
+        # permute C and num_frames: (..., num_frames, C, frame_length)
+        ndim = waveform.ndim
+        perm = list(range(ndim - 3)) + [ndim - 2, ndim - 3, ndim - 1]
+        waveform = waveform.permute(*perm).contiguous()
+        # flatten batch and frames -> (B*num_frames, C, frame_length)
+        waveform = waveform.reshape(B * num_frames, C, frame_length)
+    else:
+        num_frames = None
+        waveform = waveform.reshape(B, C, T)
+
+    # --- K-weighting ---
+    waveform = torchaudio.functional.treble_biquad(waveform, sample_rate, 4.0, 1500.0, 1 / math.sqrt(2))
+    waveform = torchaudio.functional.highpass_biquad(waveform, sample_rate, 38.0, 0.5)
 
     gate_duration = min(0.4, waveform.size(-1) / sample_rate)
     overlap = 0.75
@@ -129,38 +177,71 @@ def loudness(waveform: torch.Tensor, sample_rate: int):
     gate_samples = int(round(gate_duration * sample_rate))
     step = int(round(gate_samples * (1 - overlap)))
 
-    # Apply K-weighting
-    waveform = torchaudio.functional.treble_biquad(waveform, sample_rate, 4.0, 1500.0, 1 / math.sqrt(2))
-    waveform = torchaudio.functional.highpass_biquad(waveform, sample_rate, 38.0, 0.5)
+    # energy: (B_eff, C, W) where W = num_gate_windows
+    energy = torch.square(waveform).unfold(-1, gate_samples, step).mean(dim=-1)
 
-    # Compute the energy for each block
-    energy = torch.square(waveform).unfold(-1, gate_samples, step)
-    energy = torch.mean(energy, dim=-1)
+    g = torch.tensor([1.0, 1.0, 1.0, 1.41, 1.41], dtype=waveform.dtype, device=waveform.device)[:C]
 
-    # Compute channel-weighted summation
-    g = torch.tensor([1.0, 1.0, 1.0, 1.41, 1.41], dtype=waveform.dtype, device=waveform.device)
-    g = g[: energy.size(-2)]
+    if keep_channels:
+        # Per-channel path: all ops over window dim W, preserve C
+        # lval: (B_eff, C, W)
+        lval = kweight_bias + 10 * torch.log10(energy.clamp(min=1e-10))
 
-    energy_weighted = torch.sum(g.unsqueeze(-1) * energy, dim=-2)
-    loudness = -0.691 + 10 * torch.log10(energy_weighted)
+        # Absolute gating per channel
+        gated = lval > gamma_abs  # (B_eff, C, W)
+        count = gated.sum(dim=-1).clamp(min=1)
+        energy_filtered = (gated * energy).sum(dim=-1) / count  # (B_eff, C)
+        gamma_rel = kweight_bias + 10 * torch.log10(energy_filtered.clamp(min=1e-10)) - 10  # (B_eff, C)
 
-    # Apply absolute gating of the blocks
-    gated_blocks = loudness > gamma_abs
-    gated_blocks = gated_blocks.unsqueeze(-2)
+        # Relative gating per channel
+        gated_rel = gated & (lval > gamma_rel.unsqueeze(-1))  # (B_eff, C, W)
+        count_rel = gated_rel.sum(dim=-1).clamp(min=1)
+        energy_final = (gated_rel * energy).sum(dim=-1) / count_rel  # (B_eff, C)
 
-    energy_filtered = torch.sum(gated_blocks * energy, dim=-1) / torch.count_nonzero(gated_blocks, dim=-1)
-    energy_weighted = torch.sum(g * energy_filtered, dim=-1)
-    gamma_rel = kweight_bias + 10 * torch.log10(energy_weighted) - 10
+        LKFS = torch.where(
+            gated_rel.any(dim=-1),
+            kweight_bias + 10 * torch.log10(energy_final.clamp(min=1e-10)),
+            torch.full_like(energy_final, -torch.inf),
+        )  # (B_eff, C)
 
-    # Apply relative gating of the blocks
-    gated_blocks = torch.logical_and(gated_blocks.squeeze(-2), loudness > gamma_rel.unsqueeze(-1))
-    gated_blocks = gated_blocks.unsqueeze(-2)
+        if num_frames is not None:
+            LKFS = LKFS.reshape(*batch_shape, num_frames, C)
+        else:
+            LKFS = LKFS.reshape(*batch_shape, C)
+    else:
+        # Combined-channel path: reduce C via g weights first
+        # energy_w: (B_eff, W)
+        energy_w = torch.einsum('bcw,c->bw', energy, g)
+        lval = kweight_bias + 10 * torch.log10(energy_w.clamp(min=1e-10))
 
-    energy_filtered = torch.sum(gated_blocks * energy, dim=-1) / torch.count_nonzero(gated_blocks, dim=-1)
-    energy_weighted = torch.sum(g * energy_filtered, dim=-1)
-    if energy_weighted.isnan():
-        return torch.tensor(-torch.inf)
-    LKFS = kweight_bias + 10 * torch.log10(energy_weighted)
+        # Absolute gating
+        gated = lval > gamma_abs  # (B_eff, W)
+        count = gated.sum(dim=-1).clamp(min=1)
+        energy_filtered = torch.einsum('bcw,bw->bc', energy, gated.float()) / count.unsqueeze(-1)  # (B_eff, C)
+        energy_w_f = torch.einsum('bc,c->b', energy_filtered, g)  # (B_eff,)
+        gamma_rel = kweight_bias + 10 * torch.log10(energy_w_f.clamp(min=1e-10)) - 10
+
+        # Relative gating
+        gated_rel = gated & (lval > gamma_rel.unsqueeze(-1))  # (B_eff, W)
+        count_rel = gated_rel.sum(dim=-1).clamp(min=1)
+        energy_filtered = torch.einsum('bcw,bw->bc', energy, gated_rel.float()) / count_rel.unsqueeze(-1)
+        energy_w_f = torch.einsum('bc,c->b', energy_filtered, g)
+
+        LKFS = torch.where(
+            gated_rel.any(dim=-1),
+            kweight_bias + 10 * torch.log10(energy_w_f.clamp(min=1e-10)),
+            torch.full_like(energy_w_f, -torch.inf),
+        )  # (B_eff,)
+
+        if len(batch_shape) > 0:
+            if num_frames is not None:
+                LKFS = LKFS.reshape(*batch_shape, num_frames)
+            else:
+                LKFS = LKFS.reshape(*batch_shape)
+        else: 
+            LKFS = LKFS.squeeze(0)
+
+
     return LKFS
 
 def checklist(item, n=1, copy=False):
@@ -192,7 +273,6 @@ def parse_features(features=None, device=None, add_args=None):
         if device is not None: 
             set_gin_constant("DEVICE", device)
         return [f(*add_args[i][0], **add_args[i][1]) for i, f in enumerate(checklist(features))]
-
 
 
 def feature_from_gin_config(config_path, add_args=None):
@@ -299,6 +379,8 @@ def pad(
     else:
         raise ValueError('pad mode %s not recognized.'%pad_mode)
 
+
+
 def mirror_pad(tensor, target_size, mode="reflect", value=0):
     if (tensor.shape[-1] < target_size):
         pad_len = target_size - tensor.shape[-1]
@@ -310,6 +392,63 @@ def mirror_pad(tensor, target_size, mode="reflect", value=0):
         return tensor[..., crop_bef:-crop_aft]
     else:
         return tensor
+
+
+import numpy as np
+def frame(
+    x: torch.Tensor,
+    *,
+    frame_length: int,
+    hop_length: int,
+    axis: int = -1,
+) -> np.ndarray:
+ 
+    # x = np.array(x, copy=False, subok=subok)
+
+    if x.shape[axis] < frame_length:
+        raise ValueError(
+            f"Input is too short (n={x.shape[axis]:d}) for frame_length={frame_length:d}"
+        )
+
+    if hop_length < 1:
+        raise ValueError(f"Invalid hop_length: {hop_length:d}")
+
+    # put our new within-frame axis at the end for now
+    out_strides = x.stride() + tuple([x.stride()[axis]])
+
+    # Reduce the shape on the framing axis
+    x_shape_trimmed = list(x.shape)
+    x_shape_trimmed[axis] -= frame_length - 1
+
+    out_shape = tuple(x_shape_trimmed) + tuple([frame_length])
+    xw = x.as_strided(out_shape, out_strides)
+
+    if axis < 0:
+        target_axis = axis - 1
+    else:
+        target_axis = axis + 1
+
+    xw = torch.moveaxis(xw, -1, target_axis)
+
+    # Downsample along the target axis
+    slices = [slice(None)] * xw.ndim
+    slices[axis] = slice(0, None, hop_length)
+    return xw[tuple(slices)]
+
+def frame_with_pad(x: torch.Tensor, frame_length: int, hop_size: int) -> torch.Tensor:
+    """
+    Extends librosa.util.frame with end padding if required, similar to 
+    tf.signal.frame(pad_end=True).
+
+    Returns:
+        framed_audio: tensor with shape (n_windows, AUDIO_N_SAMPLES)
+    """
+    n_frames = math.ceil(x.shape[-1] / hop_size)
+    n_pads = (n_frames - 1) * hop_size + frame_length - x.shape[-1]
+    x = pad(x, x.size(-1) + n_pads, PadMode.REFLECT)
+    # framed_audio = librosa.util.frame(x, frame_length=frame_length, hop_length=hop_size)
+    framed_audio = frame(x, frame_length=frame_length, hop_length=hop_size)
+    return framed_audio
 
 
 def match_loudness(signal, target_signal, sr):
@@ -382,4 +521,11 @@ def get_folder_size(path):
     size = sum(f.stat().st_size for f in Path(path).rglob('*') if f.is_file())
     size /= (1024 ** 3)
     return size
+
+
+def nearest_interp_np(signal: np.ndarray, target_length: int):
+    x_new = np.linspace(0, signal.shape[-1] - 1, target_length)
+    out = signal[..., np.round(x_new).astype(int)]
+    return out
+
   

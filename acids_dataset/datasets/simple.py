@@ -30,7 +30,7 @@ class AudioDataset(torch.utils.data.Dataset):
                  output_type: str = "torch",
                  channels: int = 1, 
                  lazy_import: bool = False, 
-                 lazy_paths: str = False,
+                 lazy_paths: bool = False,
                  subindices: Iterable[int] | Iterable[bytes] | None = None,
                  parent = None,
                  max_samples: int | None = None,
@@ -49,7 +49,7 @@ class AudioDataset(torch.utils.data.Dataset):
             self._subindices = self._parse_required_fields(self._subindices, self._required_fields)
         self._parent = None
         self._partitions = {}
-        self._index_mapper = lambda x: x
+        # self._index_mapper = lambda x: x
         self._max_samples = max_samples
         if parent:
             self.parent = parent
@@ -342,8 +342,7 @@ class AudioDataset(torch.utils.data.Dataset):
             partitions = self._split_without_feature(**partitions)
         else:
             partitions = self._split_with_features(partitions, features, tolerance = tolerance, balance_cardinality=balance_cardinality)
-        if write:
-            self._write_partition(partitions, write)
+        if write:            self._write_partition(partitions, write)
         return partitions
 
     def load_partition(self, name: str | None, check: bool = False):

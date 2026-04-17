@@ -1,4 +1,5 @@
 import os, sys
+import gin
 import random
 import lmdb
 import shutil
@@ -99,6 +100,7 @@ def test_build_dataset(config, dataset, test_name, test_k = 1):
             audio = ae.get_audio("waveform")
 
 
+
 @pytest.mark.parametrize('config', ['default.gin'])
 def test_slakh_dataset(config, test_name, test_k=2):
     # test writing
@@ -127,6 +129,36 @@ def test_slakh_dataset(config, test_name, test_k=2):
             midi = ae.get_data("midi")
             loudness = ae.get_array("loudness")
 
+
+
+@pytest.mark.parametrize("dataset", get_available_datasets())
+@pytest.mark.parametrize("channels", [None, 1, 2, 8])
+@pytest.mark.parametrize('config', ['default.gin'])
+@pytest.mark.parametrize("keep_gin_constants", [True, False])
+def test_preprocessing_fn(dataset, config, channels, keep_gin_constants, test_name):
+    gin.clear_config(clear_constants=True)
+    dataset_path = Path(__file__).parent / "datasets" / test_name
+    os.makedirs(dataset_path, exist_ok=True)
+    dataset = preprocess_dataset(
+        path = get_dataset(dataset), 
+        out = dataset_path, 
+        config=config,
+        chunk_length=10000, 
+        hop_length=2000,
+        sample_rate=48000,
+        channels=channels,
+        keep_gin_constants=keep_gin_constants, 
+        force=True
+    )
+
+    assert gin.config_str() == ""
+    assert gin.operative_config_str() == ""
+    constants = dict(gin.config._CONSTANTS.items())
+    constants.pop('gin.REQUIRED')
+    if keep_gin_constants: 
+        assert len(constants) > 0
+    else:
+        assert len(constants) == 0
 
     
 

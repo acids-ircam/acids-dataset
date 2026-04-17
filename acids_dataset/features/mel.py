@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from typing import Optional, Callable
 from torchaudio.transforms import MelSpectrogram
+from . import RAISE_EXC_IF_FEATURE_ERROR
 from .base import AcidsDatasetFeature
 
 
@@ -37,7 +38,8 @@ class Mel(AcidsDatasetFeature):
             data = torch.from_numpy(data).float()
         try: 
             mels = self.mel_spectrogram(data)
-        except RuntimeError:
+        except RuntimeError as e:
+            if RAISE_EXC_IF_FEATURE_ERROR: raise e
             return  
         if write:
             fragment.put_array(self.feature_name, mels)

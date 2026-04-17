@@ -55,3 +55,8 @@ Issues = "https://github.com/acids-ircam/acids-dataset/issues"
 
 [tool.setuptools.package-data]
 acids_dataset = ["configs/*.gin", "transforms/basic_pitch_torch/assets/*.pth"]
+
+[project.optional-dependencies]
+pesto = ["pesto-pitch"]
+crepe = ["torchcrepe"]
+pyworld = ["pyworld"]

@@ -1,5 +1,5 @@
 import os
-RAISE_EXC_IF_FEATURE_ERROR = os.environ.get('ACIDSTRANSFORMS_RAISE_EXC_IF_FEATURE_ERROR', False)
+RAISE_EXC_IF_FEATURE_ERROR = bool(os.environ.get('ACIDSTRANSFORMS_RAISE_EXC_IF_FEATURE_ERROR', True))
 
 # features
 from .base import AcidsDatasetFeature, check_feature_configs

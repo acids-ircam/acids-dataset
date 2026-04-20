@@ -1,4 +1,7 @@
-import gin
+import os, gin
+
+RAISE_EXC_IF_WRITER_ERROR = bool(os.environ.get('ACIDSTRANSFORMS_RAISE_EXC_IF_WRITER_ERROR', True))
+
 from .utils import *
 from .lmdb_writer import LMDBWriter, LMDBLoader
 

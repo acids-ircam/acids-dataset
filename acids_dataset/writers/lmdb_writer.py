@@ -10,6 +10,7 @@ import shutil
 import lmdb
 import tqdm
 from pathlib import Path
+from . import RAISE_EXC_IF_WRITER_ERROR
 from .utils import audio_paths_from_dir, FeatureHash, KeyIterator, StatusBytes, status_bytes, checklist
 from .. import get_fragment_class, get_parser_class_from_path, get_metadata_from_path, get_fragment_class_from_path
 from ..utils import get_folder_size
@@ -19,7 +20,6 @@ from ..features import AcidsDatasetFeature
 from typing import List, Callable, Literal, Tuple
 import gin
 import yaml
-
 
 non_buffer_keys = ['feature_hash', 'feature_status', 'features', 'keygen']
 VERBOSE = False
@@ -128,10 +128,6 @@ class LMDBWriter(object):
         feature_status['waveform'] = StatusBytes()
         return feature_status
 
-    def open(self): 
-        return lmdb.open(str(self.output_path.resolve()), 
-                        map_size = int(self.max_db_size * 1024 ** 3))
-    
     @staticmethod
     def get_feature_name(f):
         """returns feature name for a given AcidsFeature object."""
@@ -233,8 +229,11 @@ class LMDBWriter(object):
                         fragment.serialize()
                     )
                     feature_status['waveform'].push(fragment.has_buffer('waveform'))
-            except FileNotReadException: 
-                pass
+            except FileNotReadException as e: 
+                if RAISE_EXC_IF_WRITER_ERROR: 
+                   raise e
+                else:
+                   pass
         return n_seconds
 
     @classmethod
@@ -253,12 +252,12 @@ class LMDBWriter(object):
 
     def build(self, compact: bool = False):
         """Builds the pre-processed database."""
-        env = self.open()
         n_seconds = 0
         metadata = {}
         feature_hash = self._init_feature_hash()
         feature_status = self._init_feature_status(self.features)
         key_generator = iter(KeyIterator())
+        env = lmdb.open(str(self.output_path), lock=False, readonly=False, map_size = int(self.max_db_size * 1024 ** 3))
         with env.begin(write=True) as txn:
             for i, current_file in tqdm.tqdm(enumerate(self._files), total=len(self._files)):
                 dataset_path = self._retrieve_basedir_from_path(current_file)
@@ -283,6 +282,8 @@ class LMDBWriter(object):
             type(self)._add_features_to_lmdb(txn, self.features)
             type(self)._add_keygen_to_lmdb(txn, key_generator)
             type(self)._add_feature_status_to_lmdb(txn, feature_status)
+
+        env.close()
 
         # write metadata
         metadata_path = self.output_path / "metadata.yaml"
@@ -318,6 +319,7 @@ class LMDBWriter(object):
                     shutil.move(os.path.join(self.output_path, f), os.path.join(tmpdir, f))
                 with lmdb.open(tmpdir, meminit=False, map_async=True) as env:
                     env.copy(path=str(self.output_path), compact=True)
+                env.close()
 
     @classmethod
     def get_feature_hash(cls, txn):
@@ -554,8 +556,9 @@ class LMDBLoader(object):
         keygen_class = getattr((locals().get(self._metadata.get('writer_class')) or LMDBWriter), "KeyGenerator", KeyIterator)
         filter_keys = list(map(lambda x: keygen_class.from_str(x), non_buffer_keys))
         print_files("init")
-        
-        with self.database.begin() as txn:
+
+        env = lmdb.open(str(self._db_path), lock=False, readonly=True)        
+        with env.begin()as txn:
             self._keys = list(filter(lambda x: x not in filter_keys, txn.cursor().iternext(values=False)))
             self._length = len(self._keys)
             keygen = txn.get('keygen'.encode('utf-8'))
@@ -564,6 +567,7 @@ class LMDBLoader(object):
             self._features = [] if features is None else dill.loads(features)
             feature_status = txn.get(self._keygen.from_str('feature_status')) 
             self._feature_status = None if feature_status is None else dill.loads(feature_status)
+        env.close()
 
     def __len__(self):
         return self._length
@@ -577,7 +581,8 @@ class LMDBLoader(object):
         else:
             assert isinstance(idx, bytes), "__getitem__ must be either int or bytes"
             idx_key = idx
-        with self.database.begin(write=False) as txn:
+        env = lmdb.open(str(self._db_path), readonly=True, lock=False)
+        with env.begin(write=False) as txn:
             fg = self._fragment_class(txn.get(idx_key), output_type=self._output_type)
         return fg
 
@@ -586,15 +591,6 @@ class LMDBLoader(object):
 
     def get_key_from_idx(self, idx: int):
         return self._keys[idx]
-
-    def open(self, path=None, readonly=True, lock=False):
-        if path is None: path = self._db_path
-        #print(path, lock, readonly)
-        return lmdb.open(str(path), lock=lock, readonly=readonly)
-
-    @property
-    def database(self):
-        return self.open()
 
     @property
     def feature_status(self):

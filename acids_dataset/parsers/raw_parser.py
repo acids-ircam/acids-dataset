@@ -32,8 +32,8 @@ class TorchaudioBackend(object):
         def _load_file(fragment_class = dict, audio_path=audio_path):
             try:
                 wav, orig_sr = torchaudio.load(audio_path)
-            except RuntimeError: 
-                raise FileNotReadException(audio_path, cls)
+            except RuntimeError as e: 
+                raise FileNotReadException(audio_path, cls, e)
             if orig_sr != sr:
                 wav = torchaudio.functional.resample(wav, orig_sr, sr)
             if channels is not None:

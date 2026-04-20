@@ -205,7 +205,7 @@ def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None 
         )  # (B_eff, C)
 
         if num_frames is not None:
-            LKFS = LKFS.reshape(*batch_shape, num_frames, C)
+            LKFS = LKFS.reshape(*batch_shape, num_frames, C).transpose(-2, -1)
         else:
             LKFS = LKFS.reshape(*batch_shape, C)
     else:

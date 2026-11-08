@@ -20,7 +20,7 @@ mkdocs serve                # local preview at http://127.0.0.1:8000
 mkdocs build --strict       # static site in site/
 ```
 
-It is published on GitHub Pages by `.github/workflows/docs.yml`, and can be hosted on Read the Docs with `.readthedocs.yaml`.
+It is published on GitHub Pages by `.github/workflows/docs.yml`, and can be hosted on Read the Docs with `.readthedocs.yaml`. There are also additional tutorials as Jupyter notebooks in the `extras/` folder ; check this out!
 
 ## Installation
 

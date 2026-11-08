@@ -47,6 +47,8 @@ class CQT(AcidsDatasetFeature):
         kwargs_repr = ", ".join([f"{a}={b}" for a, b in self.kwargs.items()])
         return f"CQT(sr={self.sr}, {kwargs_repr})"
 
+    supports_batch = True
+
     @property
     def has_hash(self):
         return False
@@ -55,11 +57,17 @@ class CQT(AcidsDatasetFeature):
     def default_feature_name(self):
         return f"cqt_{self.kwargs.get('n_bins', 84)}"
 
+    def _compute(self, data) -> np.ndarray:
+        """constant-Q transform of (..., C, T) audio, with real and imaginary parts concatenated along the channel axis."""
+        if torch.is_tensor(data): data = data.detach().cpu().numpy()
+        cqt = self.cqt(np.asarray(data, dtype=np.float32), sr=self.sr, **self.kwargs)
+        # (..., C, F, T) : channels are the third last axis
+        return np.concatenate([cqt.real, cqt.imag], axis=-3).astype(np.float32)
+
     def from_fragment(self, fragment, write: bool = True):
         data = fragment.get_audio("waveform")
         try: 
-            cqt = self.cqt(data)
-            cqt = np.concatenate([cqt.real, cqt.imag], axis=0)
+            cqt = self._compute(data)
         except RuntimeError:
             return  
         if write:
@@ -67,6 +75,5 @@ class CQT(AcidsDatasetFeature):
         return cqt
 
     def __call__(self, x):
-        x_cqt = torch.from_numpy(self.cqt(x.cpu()))
-        return x_cqt.to(x)
+        return torch.from_numpy(self._compute(x)).to(x.device if torch.is_tensor(x) else "cpu")
         

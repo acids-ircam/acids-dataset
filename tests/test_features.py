@@ -1,12 +1,16 @@
 import pytest
 import torch, torchaudio
 import random
+import math
 import os
 from pathlib import Path
 import shutil
 import gin
 from . import OUT_TEST_DIR, test_name, get_feature_configs, CURRENT_TEST_DIR, check_dataset_loading
-import lmdb, random
+import lmdb
+import random
+import math
+from acids_dataset.writers.lmdb_writer import non_buffer_keys
 from .datasets import get_available_datasets, get_dataset
 
 import acids_dataset as ad
@@ -51,7 +55,6 @@ def test_mel(config, feature_path, feature_config, dataset, waveform, test_name,
     writer.build()
     check_dataset_loading(dataset_out, waveform, features=[mel_feature.feature_name])
 
-    env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     mel_key = list(read_metadata(dataset_out)['features'].keys())[0]
 
@@ -89,7 +92,8 @@ def test_loudness(config,  dataset, test_name, keep_channels, frame_length, wave
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
@@ -108,9 +112,10 @@ def test_loudness(config,  dataset, test_name, keep_channels, frame_length, wave
                     assert loudness.ndim == 1
                 else:
                     assert loudness.ndim == 0
-    
-        
+    env.close()
 
+        
+    
 @pytest.mark.parametrize('config', ['default.gin'])
 @pytest.mark.parametrize("dataset", get_available_datasets())
 @pytest.mark.parametrize('feature_path,feature_config', get_feature_configs('midi'))
@@ -140,7 +145,8 @@ def test_after_midi(config, dataset, feature_path, feature_config, waveform, tes
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
@@ -149,8 +155,9 @@ def test_after_midi(config, dataset, feature_path, feature_config, waveform, tes
             if waveform:
                 audio = ae.get_audio("waveform")
             midi = ae.get_data("midi")
-    
+    env.close()
         
+    
 @pytest.mark.parametrize('config', ['default.gin'])
 @pytest.mark.parametrize("dataset", ['simple'])
 @pytest.mark.parametrize('feature_path,feature_config', get_feature_configs('module'))
@@ -178,7 +185,6 @@ def test_module(config, dataset, feature_path, feature_config, waveform, test_na
     writer.build()
     check_dataset_loading(dataset_out, waveform, features=[f.feature_name for f in module_feature])
 
-    env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     loader = AudioDataset(str(dataset_out))
     random_keys = random.choices(loader.keys, k=test_k)
     for r in random_keys:
@@ -275,6 +281,7 @@ def test_pitch_features(pitch_method, test_name, frame_length, hop_length, wavef
 @pytest.mark.parametrize('feature_path,feature_config', get_feature_configs('beattrack'))
 @pytest.mark.parametrize("waveform", [True, False])
 def test_beat_tracking(config, dataset, module, feature_path, feature_config, waveform, test_name, test_k=10):
+    init_gin_constants()
     set_gin_constant('SAMPLE_RATE', 44100)
     set_gin_constant('DEVICE', "cpu")
     set_gin_constant('CHANNELS', 1)
@@ -298,7 +305,8 @@ def test_beat_tracking(config, dataset, module, feature_path, feature_config, wa
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
@@ -307,6 +315,7 @@ def test_beat_tracking(config, dataset, module, feature_path, feature_config, wa
             if waveform:
                 audio = ae.get_audio("waveform")
             beat_clock = ae.get_array(beat_feature.feature_name)
+    env.close()
 
 
 
@@ -350,3 +359,12 @@ def test_loudness_frames(n_samples, keep_channels):
     assert out.shape[-1] == n_samples // 512
     scripted = LoudnessScript(frame_length=512, sr=44100, keep_channels=keep_channels)(x)
     assert out.shape == scripted.shape and torch.allclose(out, scripted, atol=1e-3)
+
+
+@pytest.mark.parametrize("gain", [2., 4., 0.25])
+def test_loudness_gain(gain):
+    # loudness follows gains exactly, also for loud signals (K-weighting filters must not clip)
+    from acids_dataset.utils import loudness
+    g = torch.Generator().manual_seed(0)
+    x = 0.2 * torch.randn(2, 22050, generator=g)
+    assert abs(float(loudness(gain * x, 22050) - loudness(x, 22050)) - 20 * math.log10(gain)) < 1e-3

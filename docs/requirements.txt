@@ -1,0 +1,5 @@
+mkdocs>=1.6,<2
+mkdocs-material>=9.5
+mkdocstrings[python]>=0.26
+# mkdocstrings < 1.0.8 (the last versions for Python 3.10) are not compatible with pymdown-extensions 12
+pymdown-extensions<12; python_version < '3.11'

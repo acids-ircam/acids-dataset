@@ -143,7 +143,8 @@ class BeatTrack(AcidsDatasetFeature):
                 assert length is not None, "length is required if _extract_from_file is provided a start or a end keyword."
                 start = None if start is None else int((start * data['beat'].shape[-1]) / length)
                 end = None if end is None else int((end * data['beat'].shape[-1]) / length)
-            clock = data["beat"][slice(start, end)]
+            # clocks are stacked (beat, downbeat) along the first axis : chunks are sliced along time
+            clock = data["beat"][..., slice(start, end)]
         return clock
 
     def pre_chunk_hook(self, path, audio, sr, dataset_path):

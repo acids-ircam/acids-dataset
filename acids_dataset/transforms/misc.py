@@ -86,7 +86,7 @@ class Stretch(Transform):
 
     def apply_random(self, x):
         if random.random() < self.p:
-            return self.__call__(x)
+            return self.apply(x)
         else:
             return x
 

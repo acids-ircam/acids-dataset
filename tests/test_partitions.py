@@ -93,3 +93,82 @@ def test_combined_partitions(paths, modes):
     loaded = combined.load_partition("combined_split")
     assert {k: len(v) for k, v in loaded.items()} == {k: len(v) for k, v in partitions.items()}
     assert loaded["valid"][0].shape == (1, 44100)
+
+
+# continuous features : stratified partitions
+
+import numpy as np
+import torchaudio
+from acids_dataset.features import Loudness
+
+GAIN_SR = 22050
+
+
+@pytest.fixture(scope="module")
+def gain_paths(tmp_path_factory):
+    """40 sines with gains uniformly spread from -40 to -5 dB."""
+    root = tmp_path_factory.mktemp("gains")
+    raw = root / "gains"
+    raw.mkdir()
+    t = torch.arange(GAIN_SR) / GAIN_SR
+    for i, gain in enumerate(np.linspace(-40, -5, 40)):
+        torchaudio.save(str(raw / f"file_{i:02d}.wav"), (10 ** (gain / 20) * torch.sin(2 * np.pi * 440 * t))[None], sample_rate=GAIN_SR)
+    preprocess_dataset(raw, out=root / "preprocessed", chunk_length=GAIN_SR // 2, sample_rate=GAIN_SR, channels=1, 
+                       features=[Loudness(sr=GAIN_SR, keep_channels=False)], force=True)
+    return {"online": raw, "preprocessed": root / "preprocessed"}
+
+
+def load_gains(paths, mode):
+    if mode == "online":
+        return AudioDataset(paths["online"], sr=GAIN_SR, chunk_length=GAIN_SR // 2, features=[Loudness(sr=GAIN_SR, keep_channels=False)], write_index=False)
+    return AudioDataset(paths["preprocessed"])
+
+
+def partition_loudness(partition):
+    return np.array([float(partition.get(i, output_pattern="loudness")) for i in range(len(partition))])
+
+
+@pytest.mark.parametrize("mode", ["online", "preprocessed"])
+@pytest.mark.parametrize("features", [["loudness"], ["original_path", "loudness"]])
+def test_stratified_partitions(gain_paths, mode, features):
+    dataset = load_gains(gain_paths, mode)
+    target = {"train": 0.5, "valid": 0.25, "test": 0.25}
+    partitions = dataset.split(target, features=features, seed=0, n_bins=5)
+    assert sum(len(p) for p in partitions.values()) == len(dataset)
+    overall = partition_loudness(dataset)
+    for name, p in partitions.items():
+        assert abs(len(p) / len(dataset) - target[name]) < 0.06
+        values = partition_loudness(p)
+        # each partition covers the whole range of values, with a similar distribution
+        assert abs(np.median(values) - np.median(overall)) < 4.
+        assert values.min() < np.percentile(overall, 20) and values.max() > np.percentile(overall, 80)
+    # a random split of the same sizes is much less balanced in the worst case ; here, check reproducibility
+    again = dataset.split(target, features=features, seed=0, n_bins=5)
+    assert partition_signature(again) == partition_signature(partitions)
+    if mode == "preprocessed" and "original_path" in features:
+        files = {name: {p for p, keys in dataset.feature_hash["original_path"].items() 
+                        if set(map(dataset._key_to_str, keys)) & set(map(dataset._key_to_str, part._subindices))} for name, part in partitions.items()}
+        assert files["train"].isdisjoint(files["valid"]) and files["train"].isdisjoint(files["test"])
+
+
+@pytest.mark.parametrize("mode", ["online", "preprocessed"])
+def test_stratified_partitions_errors(gain_paths, mode):
+    dataset = load_gains(gain_paths, mode)
+    with pytest.raises(ValueError):
+        dataset.split({"train": 0.5, "valid": 0.5}, features=["loudness", "loudness_2"])
+    with pytest.raises(ValueError):
+        dataset.split({"train": 0.5, "valid": 0.5}, features=["unknown"])
+    # partial ratios : the remaining part is left out
+    partitions = dataset.split({"train": 0.5, "valid": 0.2}, features=["loudness"], seed=1)
+    assert 0.6 * len(dataset) <= sum(len(p) for p in partitions.values()) <= 0.8 * len(dataset)
+
+
+def test_assign_stratified():
+    from acids_dataset.datasets.base import AudioDataset as Base
+    import random
+    groups = list(range(100))
+    values = list(range(100))
+    assignment = Base._assign_stratified(groups, [1.] * 100, values, {"a": 0.8, "b": 0.2}, n_bins=10, rng=random.Random(0))
+    assert len(assignment["a"]) == 80 and len(assignment["b"]) == 20
+    # b gets values spread over the whole range
+    assert np.histogram(assignment["b"], bins=5, range=(0, 100))[0].min() >= 3

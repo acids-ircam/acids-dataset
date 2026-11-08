@@ -9,7 +9,7 @@ import torchaudio
 from pathlib import Path
 
 from acids_dataset import preprocess_dataset
-from acids_dataset.datasets import AudioDataset, OnlineAudioDataset, PreprocessedAudioDataset, is_preprocessed_path
+from acids_dataset.datasets import CombinedAudioDataset, AudioDataset, OnlineAudioDataset, PreprocessedAudioDataset, is_preprocessed_path
 from acids_dataset.datasets.base import AudioDataset as BaseAudioDataset, chunk_length_to_samples
 from acids_dataset.fragments import AcidsFragment
 from acids_dataset.features import Loudness
@@ -71,8 +71,10 @@ def test_dispatch(paths):
     assert type(OnlineAudioDataset(paths["raw"], write_index=False)) is OnlineAudioDataset
     with pytest.raises(ValueError):
         AudioDataset(None)
-    with pytest.raises(ValueError):
-        AudioDataset([paths["raw"], paths["preprocessed"]])
+    # lists with pre-processed datasets are combined
+    combined = AudioDataset([paths["raw"], paths["preprocessed"]], write_index=False, chunk_length=0.5)
+    assert type(combined) is CombinedAudioDataset
+    assert [type(d) for d in combined.datasets] == [OnlineAudioDataset, PreprocessedAudioDataset]
 
 
 def test_abstract_interface():
@@ -80,7 +82,7 @@ def test_abstract_interface():
         def __len__(self): return 0
     with pytest.raises(TypeError, match="abstract"):
         Incomplete()
-    for cls in [OnlineAudioDataset, PreprocessedAudioDataset]:
+    for cls in [OnlineAudioDataset, PreprocessedAudioDataset, CombinedAudioDataset]:
         assert len(cls.__abstractmethods__) == 0
 
 

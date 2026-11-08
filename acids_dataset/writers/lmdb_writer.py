@@ -646,13 +646,12 @@ class LMDBLoader(object):
 
     def iter_fragment_keys(self, as_bytes=True, txn=None):
         non_keys = list(map(self._keygen.from_str, non_buffer_keys))
+        # keys are read before being yielded, such that the database is closed while iterating (fragments can then 
+        # be read in the loop : recent versions of lmdb do not open a database twice in a process)
         with self._read_txn(txn) as transaction:
-            for key in transaction.cursor().iternext(values=False):
-                if key not in non_keys:
-                    if as_bytes:
-                        yield key
-                    else:
-                        yield self._keygen.to_str(key)
+            keys = [key for key in transaction.cursor().iternext(values=False) if key not in non_keys]
+        for key in keys:
+            yield key if as_bytes else self._keygen.to_str(key)
             
     def iter_fragments(self, txn: lmdb.Environment | None = None) -> Tuple[str, AudioFragment]:
         """iter_fragments can be used to iterate contained fragments.

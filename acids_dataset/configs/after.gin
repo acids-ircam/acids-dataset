@@ -9,5 +9,8 @@ RawParser:
     pad_mode = "discard"
     loudness_threshold = -60
 
+OnlineAudioDataset:
+    loudness_threshold = -60
+
 #features.parse_features:
 #   features = [@features.AfterMIDI]

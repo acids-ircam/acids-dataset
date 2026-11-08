@@ -2,6 +2,7 @@ import os, sys
 import gin
 import random
 import lmdb
+from acids_dataset.writers.lmdb_writer import non_buffer_keys
 import shutil
 import torch
 import torchaudio
@@ -93,7 +94,8 @@ def test_build_dataset(config, dataset, waveform, test_name, test_k = 1):
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
@@ -101,6 +103,7 @@ def test_build_dataset(config, dataset, waveform, test_name, test_k = 1):
             assert ae.has_buffer("waveform") == waveform
             if waveform:
                 audio = ae.get_audio("waveform")
+    env.close()
     check_dataset_loading(dataset_out, waveform, test_k=test_k)
 
 
@@ -125,7 +128,8 @@ def test_slakh_dataset(config, waveform, test_name, test_k=2):
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
@@ -135,6 +139,7 @@ def test_slakh_dataset(config, waveform, test_name, test_k=2):
                 audio = ae.get_audio("waveform")
             midi = ae.get_data("midi")
             loudness = ae.get_array("loudness")
+    env.close()
     check_dataset_loading(dataset_out, waveform, features=[f.feature_name for f in dataset_features], test_k=test_k)
 
 

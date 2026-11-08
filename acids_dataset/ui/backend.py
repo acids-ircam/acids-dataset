@@ -2,6 +2,7 @@
 interface needs (summary, files, items, feature statistics, augmentations, partitions), independently of the UI
 library."""
 import os
+import math
 import json
 import random
 import statistics
@@ -28,6 +29,9 @@ def _jsonable(value):
         return [_jsonable(v) for v in value]
     if isinstance(value, (np.generic,)):
         return value.item()
+    if isinstance(value, float) and not math.isfinite(value):
+        # JSON cannot encode infinite values (e.g. levels of silent files)
+        return None
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return str(value)
@@ -93,7 +97,7 @@ class DatasetBrowser():
             'path': self.dataset.path,
             'n_items': len(self.dataset),
             'chunk_length': self.dataset.chunk_length,
-            'chunk_duration': self.dataset.chunk_length / self.sr,
+            'chunk_duration': self.dataset.chunk_length / self.sr if self.dataset.chunk_length else None,
             'sr': self.sr,
             'n_files': len(files),
             'total_duration': sum(durations),
@@ -229,6 +233,13 @@ class DatasetBrowser():
             except Exception as e:
                 errors.append("%s : %s"%(name, str(e).splitlines()[0] if str(e) else type(e).__name__))
         return _to_numpy(x[0]), errors
+
+    # health
+
+    def health(self, max_files: int | None = None) -> Dict[str, Any]:
+        """health report of the files of the dataset (see acids_dataset.health.dataset_health)."""
+        from ..health import dataset_health
+        return _jsonable(dataset_health(self.dataset, max_files=max_files))
 
     # partitions
 

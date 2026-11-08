@@ -14,6 +14,7 @@ except ImportError as e:
 
 from .backend import DatasetBrowser
 
+HEALTH_HEADERS = ["index", "audio path", "flags", "peak (dB)", "rms (dB)", "clipping ratio", "dc offset", "silence ratio"]
 SAMPLE_SIZES = {"100 items": 100, "1000 items": 1000, "whole dataset": None}
 
 
@@ -137,6 +138,23 @@ def build_app(browser: DatasetBrowser) -> "gr.Blocks":
             gr.JSON(value=summary, label="dataset")
             gr.Dataframe(value=browser.file_table(), headers=["index", "audio path", "duration (s)", "sr", "channels", "chunks" if not browser.is_online else "metadata"],
                          label="files", interactive=False, wrap=True)
+            with gr.Accordion("Health report", open=False):
+                gr.Markdown("Clipping, DC offset, silence and level of files (audio of pre-processed datasets is rebuilt from stored chunks).")
+                with gr.Row():
+                    health_max_files = gr.Number(value=None, precision=0, label="maximum number of files (empty for all)")
+                    health_only_flagged = gr.Checkbox(value=True, label="only flagged files")
+                    health_button = gr.Button("compute")
+                health_summary = gr.JSON(label="summary")
+                health_table = gr.Dataframe(headers=HEALTH_HEADERS, label="files", interactive=False, wrap=True)
+
+        def compute_health(max_files, only_flagged):
+            report = browser.health(max_files=None if not max_files else int(max_files))
+            level = lambda v: None if v is None else round(v, 2)
+            rows = [[r['index'], r['audio_path'], ", ".join(r['flags']), level(r['peak_db']), level(r['rms_db']), 
+                     r['clipping_ratio'], round(r['dc_offset'], 4), round(r['silence_ratio'], 3)] 
+                    for r in report['files'] if r['flags'] or not only_flagged]
+            return report['summary'], rows
+        health_button.click(compute_health, [health_max_files, health_only_flagged], [health_summary, health_table], api_name="health")
 
         # browse items and files
         with gr.Tab("Browse"):

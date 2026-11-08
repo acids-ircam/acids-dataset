@@ -6,7 +6,7 @@ import torch
 import torchaudio
 from collections import UserDict
 from absl import logging
-from ..utils import load_file, get_default_accelerated_device, get_subclasses_from_package, generate_config_from_obj, parse_config_pattern
+from ..utils import load_file, resolve_device, get_subclasses_from_package, generate_config_from_obj, parse_config_pattern
 
 class FeatureException(Exception):
     pass
@@ -55,7 +55,7 @@ class AcidsDatasetFeature(object):
             self, 
             name: Optional[str] = None,
             hash_from_feature: Optional[Callable] = None, 
-            device: torch.device = None, 
+            device: torch.device | str | None = None, 
             metadata = {}
         ):
         self.feature_name = name or self.default_feature_name
@@ -77,11 +77,11 @@ class AcidsDatasetFeature(object):
         return dict(inspect.signature(cls.__init__).parameters)
 
     def to(self, device = None):
-        if device is None: 
-            device = get_default_accelerated_device()
-        if isinstance(device, str):
-            device = torch.device(device)
-        self.device = device
+        """sets the device of the feature (subclasses with modules also move them), and returns the feature. device is 
+        a device or a device name, None for CPU, or "auto" for the default accelerated device (CUDA if available ; MPS 
+        with USE_MPS=1, see utils.get_default_accelerated_device)."""
+        self.device = resolve_device(device)
+        return self
 
     @property
     def default_feature_name(self):
@@ -90,6 +90,14 @@ class AcidsDatasetFeature(object):
     def close(self):
         """if some features has side effects like buffering, empty buffers and delete files"""
         pass
+
+    # invertible features give audio back from their outputs (see invert)
+    invertible = False
+
+    def invert(self, features, **kwargs):
+        """audio from outputs of the feature, for invertible features (see invertible) ; raises a NotImplementedError
+        otherwise."""
+        raise NotImplementedError("%s is not invertible"%type(self).__name__)
 
     def _sample(self, pos: int | float | None, sr: int):
         if isinstance(pos, float):
@@ -150,6 +158,16 @@ class AcidsDatasetFeature(object):
 
     def __call__(self, *args, **kwargs): 
         raise NotImplementedError()
+
+    # features computing batches at once (e.g. on GPU, see AudioDataset.compute_batch_features)
+    supports_batch = False
+
+    def batch_call(self, x: torch.Tensor) -> torch.Tensor:
+        """computes the feature of a batch of audio (batch, channels, samples), as extracted for each item. Features 
+        with supports_batch compute the whole batch at once ; others are computed item by item."""
+        if self.supports_batch:
+            return torch.as_tensor(self(x))
+        return torch.stack([torch.as_tensor(self(x[i])) for i in range(x.shape[0])])
         
 
 
@@ -159,7 +177,8 @@ def check_feature_configs(module, path):
     feature_subclasses = get_subclasses_from_package(module, feature_class, exclude=["beat_this"])
     os.makedirs(path, exist_ok=True)
     for feature in feature_subclasses:
-        if feature == feature_class: continue
+        # private classes (e.g. base classes of features) have no configuration
+        if feature == feature_class or feature.__name__.startswith("_"): continue
         gin_config_name = feature.__name__.lower()
         if hasattr(feature, "gin_configs"):
             for config_name, config_str in feature.gin_configs.items(): 

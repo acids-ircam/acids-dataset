@@ -6,6 +6,7 @@ import bisect
 import random
 import statistics
 import gin
+import numpy as np
 import torch, torchaudio
 from absl import logging
 from pathlib import Path
@@ -16,9 +17,17 @@ from ..writers.utils import audio_paths_from_dir
 from ..features import AcidsDatasetFeature, append_meta_regexp
 from .. import get_fragment_class
 from .base import AudioDataset, TransformType, chunk_length_to_samples
+from .utils import is_multi_index, _outs_from_pattern, _check_channels
+from .batch import parse_output_pattern, transforms_per_entry, augmented_audio_entry, entry_name
+from .baked import BakedFeature, BAKED_FOLDER, BAKED_VERSION, baked_file_path, read_baked_file, read_baked_metadata, write_baked_file, probe_frame_rate, hop_hint, to_numpy
 
 
 BatchByType = Literal["files", "dataset", "auto"]
+
+
+def _entry_from_fragment(fragment, source: str, index=None):
+    """output of a single entry of an output pattern (e.g. "waveform[0]", "loudness")."""
+    return _outs_from_pattern(fragment, "(%s)"%source, index=index)[0]
 
 
 @gin.configurable(module="datasets")
@@ -90,6 +99,8 @@ class OnlineAudioDataset(AudioDataset):
                  batch_by: BatchByType = "auto",
                  pad_mode: PadMode | str = PadMode.ZERO,
                  auto_ratio: float = 2.,
+                 loudness_threshold: float | None = None,
+                 max_retries: int = 10,
                  index_dir: str | Path | None = None,
                  partition_dir: str | Path | None = None,
                  features: List[AcidsDatasetFeature] | None = None,
@@ -102,6 +113,7 @@ class OnlineAudioDataset(AudioDataset):
                  rescan: bool = False,
                  write_index: bool = True,
                  max_samples: int | None = None,
+                 features_after_transforms: bool = True,
                  **kwargs) -> None:
         """
         Args:
@@ -113,6 +125,9 @@ class OnlineAudioDataset(AudioDataset):
             batch_by (str, optional): item sampling strategy ("files", "dataset", or "auto"). Defaults to "auto".
             pad_mode (PadMode | str, optional): padding mode for chunks exceeding files. Defaults to PadMode.ZERO.
             auto_ratio (float, optional): median duration / chunk_length ratio above which "auto" selects "dataset". Defaults to 2.
+            loudness_threshold (float | None, optional): chunks with a loudness (LUFS) below this threshold (e.g. silence) are 
+                drawn again at a random position of their file, up to max_retries times. Defaults to None.
+            max_retries (int, optional): maximum number of draws of chunks below loudness_threshold. Defaults to 10.
             index_dir (str | Path | None, optional): folder where index files are written. If None, index is written
                 as a ".ad" file in each dataset folder ; otherwise, as "<folder_name>.ad" in index_dir. Defaults to None.
             partition_dir (str | Path | None, optional): folder where partitions are written. If None, partitions are 
@@ -120,6 +135,9 @@ class OnlineAudioDataset(AudioDataset):
             features (List[AcidsDatasetFeature | str] | Dict[str, AcidsDatasetFeature | str] | None, optional): features computed 
                 dynamically on loaded audio, given as objects or feature config names (e.g. "loudness") ; dict keys set 
                 feature names. Defaults to None.
+            features_after_transforms (bool, optional): compute features on augmented audio, i.e. on the waveform output 
+                after its transforms (True), or on loaded audio, before transforms (False). Can also be given to configure 
+                and get_loader. Defaults to True.
             meta_regexp (List[str], optional): glob-like patterns for path-based metadata (e.g. "**/{{instrument}}_*.wav"). Defaults to [].
             filters (List[str], optional): glob-like patterns to filter audio paths. Defaults to [].
             exclude (List[str], optional): glob-like patterns to exclude audio paths. Defaults to [].
@@ -136,7 +154,7 @@ class OnlineAudioDataset(AudioDataset):
         if len(set(folder_names)) != len(folder_names):
             raise ValueError("dataset folders must have distinct names, got %s"%self._paths)
         self._init_common(transforms=transforms, output_pattern=output_pattern, output_type=output_type, 
-                          channels=channels, max_samples=max_samples)
+                          channels=channels, max_samples=max_samples, features_after_transforms=features_after_transforms)
         self._index_dir = None if index_dir is None else Path(index_dir).resolve()
         self._partition_dir = None if partition_dir is None else Path(partition_dir).resolve()
         self._filters = checklist(filters)
@@ -165,6 +183,8 @@ class OnlineAudioDataset(AudioDataset):
         if len(self._files) == 0:
             raise RuntimeError("no valid audio files found in %s"%self.path)
         self._auto_ratio = auto_ratio
+        self._loudness_threshold = loudness_threshold
+        self._max_retries = max_retries
         self._chunk_length = None
         self._batch_by = None
         self._pad_mode = None
@@ -295,6 +315,7 @@ class OnlineAudioDataset(AudioDataset):
             'channels': self._n_channels,
             'chunk_length': self.chunk_length,
             'batch_by': self.batch_by,
+            'loudness_threshold': self.loudness_threshold,
             'pad_mode': self._pad_mode.name.lower(),
             'features': {f.feature_name: str(f) for f in self._features},
             'meta_regexp': self._meta_regexp,
@@ -337,7 +358,7 @@ class OnlineAudioDataset(AudioDataset):
 
     @property
     def batch_by(self) -> str | None:
-        """resolved item sampling strategy ("files" or "dataset")."""
+        """resolved item sampling strategy ("files" or "dataset") ; "files" (one whole file per item) if chunk_length is None."""
         return self._batch_by
 
     @property
@@ -365,9 +386,9 @@ class OnlineAudioDataset(AudioDataset):
         if batch_by is not None:
             self._batch_by_arg = batch_by
         if self._chunk_length is None:
-            # items cannot be defined yet
-            self._batch_by = None
-            self._cum_chunks = None
+            # without chunk_length, items are whole files
+            self._batch_by = "files"
+            self._build_chunk_map()
             return
         if self.sr is None:
             raise ValueError("files have different sampling rates ; please provide sr to dataset")
@@ -375,7 +396,7 @@ class OnlineAudioDataset(AudioDataset):
         self._build_chunk_map()
 
     def _n_chunks_for_file(self, file) -> int:
-        if self._batch_by == "files":
+        if self._batch_by == "files" or self._chunk_length is None:
             return 1
         return max(1, round(file['duration'] * self.sr / self.chunk_length))
 
@@ -386,16 +407,21 @@ class OnlineAudioDataset(AudioDataset):
             n_chunks += self._n_chunks_for_file(self._files[file_idx])
             self._cum_chunks.append(n_chunks)
 
-    def configure(self, chunk_length: int | float | None = None, batch_by: BatchByType | None = None, pad_mode: PadMode | str | None = None, **kwargs) -> "OnlineAudioDataset":
+    def configure(self, chunk_length: int | float | None = None, batch_by: BatchByType | None = None, pad_mode: PadMode | str | None = None, 
+                  features_after_transforms: bool | None = None, **kwargs) -> "OnlineAudioDataset":
         """returns a copy of the dataset with given loading parameters."""
-        super().configure(**kwargs)
-        dataset = copy.copy(self)
+        dataset = copy.copy(super().configure(features_after_transforms=features_after_transforms, **kwargs))
         dataset._set_loading_params(chunk_length=chunk_length, batch_by=batch_by, pad_mode=pad_mode)
         return dataset
 
     def _check_loading_params(self):
         if self._cum_chunks is None:
-            raise ValueError("chunk_length must be given to OnlineAudioDataset (in constructor, configure, or get_loader)")
+            self._build_chunk_map()
+
+    def _check_loader_arguments(self, batch_size, loader_kwargs):
+        if self._chunk_length is None and batch_size is not None and batch_size > 1 and loader_kwargs.get('collate_fn') is None:
+            raise ValueError("items of OnlineAudioDataset are whole files if chunk_length is None, and cannot be batched : "
+                             "give chunk_length (in constructor, configure, or get_loader), batch_size=1, or a collate_fn")
 
     def __len__(self):
         self._check_loading_params()
@@ -410,6 +436,8 @@ class OnlineAudioDataset(AudioDataset):
             raise IndexError("index %d out of range for dataset of length %d"%(index, len(self)))
         position = bisect.bisect_right(self._cum_chunks, index)
         file_idx = self.file_indices[position]
+        if self._chunk_length is None:
+            return file_idx, 0.
         n_chunks = self._n_chunks_for_file(self._files[file_idx])
         chunk_idx = index - (self._cum_chunks[position - 1] if position > 0 else 0)
         duration = self._files[file_idx]['duration']
@@ -423,8 +451,96 @@ class OnlineAudioDataset(AudioDataset):
         return file_idx, start
 
     def _fragment_from_index(self, index):
+        return self._fragment_from_audio(*self._load_chunk(index))
+
+    def get(self, index, output_pattern=None, transforms=None, _global_index=None):
+        """returns the item at index (see AudioDataset.get). If features_after_transforms (default), features are computed
+        on the augmented audio, i.e. on the waveform output after its transforms (see batch.augmented_audio_entry) ; other
+        waveform entries (e.g. clean targets) are given without the transforms of this entry. Otherwise, features are
+        computed on loaded audio, before transforms."""
+        transforms = transforms or self.transforms
+        if is_multi_index(index) or transforms is None or len(self._features) == 0 or not self.features_after_transforms:
+            return super().get(index, output_pattern=output_pattern, transforms=transforms, _global_index=_global_index)
+        kind, entries = parse_output_pattern(output_pattern or self.output_pattern)
+        entry_transforms = transforms_per_entry(kind, entries, transforms)
+        audio_entry = augmented_audio_entry(entries, entry_transforms)
+        if audio_entry is None or entry_transforms[audio_entry] is None:
+            # no audio augmentation : features are computed on loaded audio
+            return super().get(index, output_pattern=output_pattern, transforms=transforms, _global_index=_global_index)
+        if hasattr(index, "item") and not isinstance(index, (str, bytes)):
+            index = index.item()
+        item_index = _global_index if _global_index is not None else (index % len(self) if isinstance(index, int) else None)
+        file_idx, start, wav = self._load_chunk(index)
+        clean = self._fragment_from_audio(file_idx, start, wav, features=[])
+        audio = _entry_from_fragment(clean, entries[audio_entry][0], item_index)
+        audio = entry_transforms[audio_entry](_check_channels(audio, self._n_channels))
+        augmented_wav = torch.as_tensor(np.ascontiguousarray(audio) if isinstance(audio, np.ndarray) else audio).float()
+        augmented = self._fragment_from_audio(file_idx, start, augmented_wav.reshape(-1, augmented_wav.shape[-1]))
+        outs = []
+        for i, (source, _) in enumerate(entries):
+            if i == audio_entry:
+                outs.append(audio)
+                continue
+            # other waveform entries are taken from loaded audio, features and metadata from augmented audio
+            out = _entry_from_fragment(clean if entry_name(source) == "waveform" else augmented, source, item_index)
+            t = entry_transforms[i]
+            outs.append(out if t is None else t(_check_channels(out, self._n_channels)))
+        if kind == "single":
+            return outs[0]
+        if kind == "tuple":
+            return tuple(outs)
+        return {alias: out for out, (_, alias) in zip(outs, entries)}
+
+    def _load_chunk(self, index):
+        """returns (file index, start, audio) of the chunk at index (silent chunks are drawn again, see loudness_threshold)."""
         file_idx, start = self.chunk_position(index)
-        return self.get_fragment(file_idx, start=start, length=self.chunk_length)
+        wav = self.load_audio(file_idx, start=start, length=self.chunk_length)
+        threshold = getattr(self, "_loudness_threshold", None)
+        if threshold is not None and self._chunk_length is not None:
+            file = self._files[file_idx]
+            max_start = max(0., file['duration'] - self.chunk_length / self.sr)
+            for _ in range(self._max_retries):
+                if self._chunk_loudness(wav) >= threshold:
+                    break
+                # silent chunks are drawn again at a random position of the file
+                start = random.uniform(0., max_start)
+                wav = self.load_audio(file_idx, start=start, length=self.chunk_length)
+        return file_idx, start, wav
+
+    def _chunk_loudness(self, wav: torch.Tensor) -> float:
+        from ..utils import loudness
+        return float(loudness(wav[..., :5, :] if wav.shape[-2] > 5 else wav, self.sr))
+
+    def item_labels(self, features, n_bins: int = 10):
+        """labels of items : values of path-based features of their files, and histogram bins of computed features 
+        (averaged over the items of each file, see _file_feature_mean)."""
+        from ..sampling import bin_values
+        self._check_loading_params()
+        computed = {f.feature_name: f for f in self._features}
+        files = self.file_indices
+        n_items = [self._cum_chunks[p] - (self._cum_chunks[p - 1] if p > 0 else 0) for p in range(len(files))]
+        per_feature = []
+        for f in checklist(features):
+            if f in self.path_features:
+                file_labels = [self._file_feature_value(i, f) for i in files]
+            elif f in computed:
+                file_labels = bin_values([self._file_feature_mean(i, computed[f]) for i in files], n_bins=n_bins)
+            else:
+                raise ValueError("feature %s cannot be used for labels ; available features : %s"%(f, self.path_features + list(computed.keys())))
+            per_feature.append([l for l, n in zip(file_labels, n_items) for _ in range(n)])
+        return self._combine_labels(per_feature)
+
+    def _computed_features(self):
+        return {f.feature_name: f for f in self._features}
+
+    def _without_features(self, names):
+        dataset = copy.copy(self)
+        dataset._features = [f for f in self._features if f.feature_name not in names]
+        return dataset
+
+    @property
+    def loudness_threshold(self) -> float | None:
+        return getattr(self, "_loudness_threshold", None)
 
     # loading
 
@@ -488,14 +604,172 @@ class OnlineAudioDataset(AudioDataset):
                 None for the whole file. Defaults to None.
             features (Iterable[AcidsDatasetFeature] | None, optional): features to compute ; None for dataset features. Defaults to None.
         """
-        file = self._files[file_idx]
         wav = self.load_audio(file_idx, start=start, length=length, **kwargs)
+        return self._fragment_from_audio(file_idx, start, wav, features=features)
+
+    def _fragment_from_audio(self, file_idx: int, start: float, wav: torch.Tensor, features=None):
+        file = self._files[file_idx]
         return self._build_fragment(self._fragment_class, wav, self._sr or file['sr'], file['audio_path'], start, file['duration'], 
                                     self._features if features is None else features, output_type=self._output_type, 
                                     bformat=self._bformat, metadata=file['metadata'])
 
+    # baked features
+
+    def _baked_roots(self, path: str | Path | None = None) -> Dict[str, Path]:
+        """{dataset folder name: baked folder} : an "ad-features" sub-folder of each dataset folder, or a folder named
+        after each dataset folder in path."""
+        if path is None:
+            return {p.name: p / BAKED_FOLDER for p in self._paths}
+        path = Path(path).resolve()
+        return {p.name: path / p.name for p in self._paths}
+
+    @property
+    def baked_features(self) -> List[str]:
+        """names of features read from baked files (see use_baked_features)."""
+        return [f.feature_name for f in self._features if isinstance(f, BakedFeature)]
+
+    def _baked_file_info(self, file_idx: int) -> Dict[str, Any]:
+        file = self._files[file_idx]
+        return {'audio_stamp': {'size': file.get('size'), 'mtime': file.get('mtime')}, 'original_sr': file['sr'],
+                'sr': self._sr or file['sr'], 'channels': self._n_channels}
+
+    def _is_baked_file_valid(self, metadata: Dict[str, Any], file_idx: int) -> bool:
+        """whether a baked file matches the audio file (unchanged) and the loading parameters (sr, channels)."""
+        expected = self._baked_file_info(file_idx)
+        return metadata.get('version') == BAKED_VERSION and all(metadata.get(k) == expected[k] for k in ['audio_stamp', 'sr', 'channels'])
+
+    def bake_features(self, *features: str | AcidsDatasetFeature, path: str | Path | None = None, overwrite: bool = False) -> "OnlineAudioDataset":
+        """computes features on whole audio files, and stores them in .ad files, such that they are read instead of
+        computed when loading chunks (see use_baked_features). Baked files mirror the architecture of dataset folders :
+        <dataset folder>/ad-features/<relative audio path>.ad, or <path>/<dataset folder name>/<relative audio path>.ad
+        if path is given. They contain the features of the whole file (time last) and their metadata : original
+        sampling rate of the file, sampling rate and channels of the audio features are computed on, frame rate
+        (feature_sr) and frame offset of each feature, and the configuration of features.
+
+        Features must have a time axis (last) : per-chunk descriptors (e.g. Tempo) and non-array features (e.g.
+        AfterMIDI) cannot be baked. Baking is incremental : features already baked with the same configuration, for
+        unchanged audio files, are skipped (unless overwrite), and new features are added to existing files.
+
+        Args:
+            *features (str | AcidsDatasetFeature): names of dataset features, or feature objects ; every feature of
+                the dataset if none is given.
+            path (str | Path | None, optional): destination folder ; None for "ad-features" sub-folders of dataset
+                folders. Defaults to None.
+            overwrite (bool, optional): re-compute features already baked. Defaults to False.
+
+        Returns:
+            OnlineAudioDataset: the dataset (features are still computed dynamically ; see use_baked_features).
+        """
+        available = {f.feature_name: f for f in self._features if not isinstance(f, BakedFeature)}
+        if len(features) == 0:
+            features = list(available.values())
+        to_bake = []
+        for f in features:
+            if isinstance(f, AcidsDatasetFeature):
+                to_bake.append(f)
+            elif f in available:
+                to_bake.append(available[f])
+            else:
+                raise ValueError("feature %s cannot be baked : available features are %s"%(f, list(available)))
+        if len(to_bake) == 0:
+            raise ValueError("no feature to bake")
+        roots = self._baked_roots(path)
+        frame_rates = {}
+        for file_idx in self.file_indices:
+            file = self._files[file_idx]
+            baked_path = baked_file_path(roots, file['audio_path'])
+            metadata, arrays = {'features': {}}, {}
+            if baked_path.exists():
+                try:
+                    metadata, arrays = read_baked_file(baked_path)
+                    if not self._is_baked_file_valid(metadata, file_idx):
+                        metadata, arrays = {'features': {}}, {}
+                except Exception as e:
+                    logging.warning("could not read baked file %s (%s) ; overwriting"%(baked_path, e))
+                    metadata, arrays = {'features': {}}, {}
+            missing = [f for f in to_bake if overwrite or metadata['features'].get(f.feature_name, {}).get('feature') != str(f)]
+            if len(missing) == 0:
+                continue
+            wav = self.load_audio(file_idx)
+            sr = self._sr or file['sr']
+            fragment = self._fragment_from_audio(file_idx, 0., wav, features=missing)
+            for f in missing:
+                if (f.feature_name, sr) not in frame_rates:
+                    frame_rates[(f.feature_name, sr)] = self._probe_baked_feature(f, sr, wav.shape[0])
+                feature_sr, frame_offset = frame_rates[(f.feature_name, sr)]
+                arrays[f.feature_name] = to_numpy(fragment.get(f.feature_name))
+                metadata['features'][f.feature_name] = {'feature_sr': feature_sr, 'frame_offset': frame_offset, 'feature': str(f),
+                                                        'shape': list(arrays[f.feature_name].shape)}
+            metadata.update(version=BAKED_VERSION, audio_path=file['audio_path'], n_samples=int(wav.shape[-1]),
+                            **self._baked_file_info(file_idx))
+            metadata['channels'] = self._n_channels
+            write_baked_file(baked_path, metadata, arrays)
+        logging.info("baked features %s in %s"%([f.feature_name for f in to_bake], sorted(set(str(r) for r in roots.values()))))
+        return self
+
+    def _probe_baked_feature(self, feature: AcidsDatasetFeature, sr: int, n_channels: int):
+        """frame rate and frame offset of a feature, computed on test signals."""
+        generator = torch.Generator().manual_seed(0)
+        def compute(n_samples):
+            wav = 0.1 * torch.randn(n_channels, n_samples, generator=generator)
+            fragment = self._build_fragment(self._fragment_class, wav, sr, "probe/probe.wav", 0., n_samples / sr, [feature],
+                                            output_type="numpy", bformat=self._bformat)
+            return np.atleast_1d(to_numpy(fragment.get(feature.feature_name)))
+        try:
+            return probe_frame_rate(compute, sr, n_channels, hop_hint=hop_hint(feature))
+        except Exception as e:
+            raise ValueError("feature %s cannot be baked : %s"%(feature.feature_name, e)) from e
+
+    def use_baked_features(self, *feature_names: str, path: str | Path | None = None, check: bool = True) -> "OnlineAudioDataset":
+        """reads given features from baked files (see bake_features) instead of computing them : chunks get the frames
+        of their position in the features of whole files. Features of the dataset with the same names are replaced ;
+        other names are added to dataset features. For a chunk starting at t seconds, frames start at the frame closest
+        to t : values may differ from features computed on chunks by the alignment of frames (up to half a hop) and
+        by edge effects (features of chunks are computed on padded chunks, baked ones on whole files).
+
+        Args:
+            *feature_names (str): names of baked features ; every feature baked for the first file if none is given.
+            path (str | Path | None, optional): folder of baked files given to bake_features ; None for "ad-features"
+                sub-folders of dataset folders. Defaults to None.
+            check (bool, optional): checks that every file of the dataset has an up-to-date baked file (unchanged audio
+                file, same sampling rate and channels) containing the features, with the same configuration as dataset
+                features of the same name ; otherwise, missing baked files raise errors when loading. Defaults to True.
+
+        Returns:
+            OnlineAudioDataset: the dataset.
+        """
+        roots = self._baked_roots(path)
+        if len(feature_names) == 0:
+            first_path = baked_file_path(roots, self._files[self.file_indices[0]]['audio_path'])
+            if not first_path.exists():
+                raise FileNotFoundError("no baked file found at %s : bake features with bake_features"%first_path)
+            feature_names = list(read_baked_metadata(first_path)['features'])
+        if check:
+            current = {f.feature_name: str(f) for f in self._features if not isinstance(f, BakedFeature)}
+            problems = []
+            for file_idx in self.file_indices:
+                file = self._files[file_idx]
+                baked_path = baked_file_path(roots, file['audio_path'])
+                if not baked_path.exists():
+                    problems.append("%s : missing"%baked_path); continue
+                metadata = read_baked_metadata(baked_path)
+                if not self._is_baked_file_valid(metadata, file_idx):
+                    problems.append("%s : outdated (audio file modified, or different sr / channels)"%baked_path); continue
+                for name in feature_names:
+                    if name not in metadata['features']:
+                        problems.append("%s : feature %s not baked"%(baked_path, name))
+                    elif name in current and metadata['features'][name]['feature'] != current[name]:
+                        problems.append("%s : feature %s baked as %s, but dataset feature is %s"%(baked_path, name, metadata['features'][name]['feature'], current[name]))
+            if len(problems) > 0:
+                raise ValueError("%d problem(s) found with baked features (use bake_features to bake them again, or check=False) :\n%s"%(
+                    len(problems), "\n".join(problems[:10]) + ("\n..." if len(problems) > 10 else "")))
+        baked = {name: BakedFeature(name, roots) for name in feature_names}
+        features = [baked.pop(f.feature_name) if f.feature_name in baked else f for f in self._features]
+        self._features = features + list(baked.values())
+        return self
+
     # feature search
-    # path-based features (original_path and meta_regexp) are known for every file without loading audio ; 
+    # path-based features (original_path and meta_regexp) are known for every file without loading audio ;
     # searching and partitioning are thus performed on files, such that chunks of a given file always 
     # belong to the same partition.
 
@@ -599,13 +873,12 @@ class OnlineAudioDataset(AudioDataset):
         subdataset = copy.copy(self)
         subdataset._subindices = subindices
         subdataset.parent = self
-        if subdataset._cum_chunks is not None:
-            subdataset._build_chunk_map()
+        subdataset._build_chunk_map()
         return subdataset
 
     def _file_weights(self, file_indices: List[int]) -> List[float]:
-        # number of items if loading parameters are set, durations otherwise
-        if self._cum_chunks is not None:
+        # number of items if chunks are defined, durations otherwise
+        if self._chunk_length is not None:
             return [float(self._n_chunks_for_file(self._files[i])) for i in file_indices]
         return [self._files[i]['duration'] for i in file_indices]
 
@@ -613,7 +886,56 @@ class OnlineAudioDataset(AudioDataset):
         files = rng.sample(self.file_indices, k=len(self.file_indices))
         return self._assign_by_ratio(files, self._file_weights(files), partitions)
 
-    def _split_with_features(self, partitions: Dict[str, float], features: List[str], tolerance: float = 0.1, balance_cardinality: bool = False, rng=random) -> Dict[str, List[int]]:
+    def _sort_split_features(self, features: List[str]) -> tuple:
+        """separates path-based (categorical) features from computed (continuous) features."""
+        computed = [f.feature_name for f in self._features]
+        categorical, continuous = [], []
+        for f in features:
+            if f in self.path_features: categorical.append(f)
+            elif f in computed: continuous.append(f)
+            else: raise ValueError("feature %s cannot be used for partitioning ; available features : %s"%(f, self.path_features + computed))
+        if len(continuous) > 1:
+            raise ValueError("partitions can only be stratified over one continuous feature, got %s"%continuous)
+        return categorical, (continuous[0] if continuous else None)
+
+    def _file_feature_mean(self, file_idx: int, feature) -> float:
+        """mean of a computed feature over the items of a file (taken at the beginning of their slots, or whole files 
+        if chunk_length is None)."""
+        if self._chunk_length is None:
+            starts = [0.]
+        else:
+            file = self._files[file_idx]
+            n_chunks = self._n_chunks_for_file(file)
+            starts = [min(i * file['duration'] / n_chunks, max(0., file['duration'] - self.chunk_length / self.sr)) for i in range(n_chunks)]
+        values = [self._reduce_feature_value(self.get_fragment(file_idx, start=s, length=self.chunk_length, features=[feature]).get(feature.feature_name)) 
+                  for s in starts]
+        values = [v for v in values if np.isfinite(v)]
+        return float(np.mean(values)) if values else float("nan")
+
+    def _split_stratified(self, partitions, groups: Dict[Any, List[int]], feature_name: str, n_bins: int = 10, rng=random) -> Dict[str, List[int]]:
+        feature = next(f for f in self._features if f.feature_name == feature_name)
+        labels, weights, values = [], [], []
+        n_missing = 0
+        for label, files in groups.items():
+            file_weights = self._file_weights(files)
+            file_values = [self._file_feature_mean(i, feature) for i in files]
+            valid = [(w, v) for w, v in zip(file_weights, file_values) if np.isfinite(v)]
+            if not valid:
+                n_missing += len(files)
+                continue
+            labels.append(label)
+            weights.append(sum(file_weights))
+            values.append(sum(w * v for w, v in valid) / sum(w for w, _ in valid))
+        if n_missing > 0:
+            logging.warning("%d files have no finite value for feature %s, and are not partitioned"%(n_missing, feature_name))
+        assignment = self._assign_stratified(labels, weights, values, partitions, n_bins=n_bins, rng=rng)
+        return {k: sorted(sum([groups[l] for l in v], [])) for k, v in assignment.items()}
+
+    def _split_with_features(self, partitions: Dict[str, float], features: List[str], tolerance: float = 0.1, balance_cardinality: bool = False, rng=random, n_bins: int = 10) -> Dict[str, List[int]]:
+        features, continuous = self._sort_split_features(features)
+        if continuous is not None and len(features) == 0:
+            # files are stratified over the continuous feature
+            return self._split_stratified(partitions, {(i,): [i] for i in self.file_indices}, continuous, n_bins=n_bins, rng=rng)
         self._check_path_features(features)
         groups = {}
         n_missing = 0
@@ -625,6 +947,9 @@ class OnlineAudioDataset(AudioDataset):
             groups.setdefault(label, []).append(i)
         if n_missing > 0:
             logging.warning("%d files have no value for features %s, and are not partitioned"%(n_missing, features))
+        if continuous is not None:
+            # groups of categorical features are stratified over the continuous feature
+            return self._split_stratified(partitions, groups, continuous, n_bins=n_bins, rng=rng)
         labels = rng.sample(list(groups.keys()), k=len(groups))
         if balance_cardinality:
             weights = [sum(self._file_weights(groups[l])) for l in labels]
@@ -658,13 +983,15 @@ class OnlineAudioDataset(AudioDataset):
               balance_cardinality: bool = False, 
               tolerance: float = 0.1, 
               write: str | bool | None = None,
-              seed: int | None = None) -> Dict[str, "OnlineAudioDataset"]:
+              seed: int | None = None,
+              n_bins: int = 10) -> Dict[str, "OnlineAudioDataset"]:
         """splits dataset files in partitions.
 
         Args:
             partitions (Dict[str, float]): partition ratios (e.g. {"train": 0.8, "valid": 0.2}).
             features (List[str] | None, optional): path-based features (original_path, or meta_regexp features) used to group 
-                files, such that each feature value belongs to a single partition. Defaults to None.
+                files, such that each feature value belongs to a single partition. A computed (continuous) feature can also be 
+                given (e.g. loudness) : partitions are then stratified over its values (see n_bins). Defaults to None.
             use_meta_if_available (str | bool | None, optional): if a path-based feature with this name (or "partition" if True) 
                 exists, its values are used as partitions. Defaults to True.
             load_if_available (bool | str | None, optional): loads the partition with this name (or default name if True) 
@@ -674,6 +1001,9 @@ class OnlineAudioDataset(AudioDataset):
             write (str | bool | None, optional): writes partition with this name (or default name if True). Defaults to None.
             seed (int | None, optional): seed of random partitions ; partitions with the same seed are identical (e.g. across 
                 processes of distributed training). If None, the global random state is used. Defaults to None.
+            n_bins (int, optional): number of histogram (quantile) bins of continuous features : files are shuffled within 
+                bins, and bins are distributed among partitions, such that each partition has a similar distribution of the 
+                feature. Feature values are computed on the items of each file. Defaults to 10.
         """
         assert not self.is_partition, "dataset is already a partition of an existing dataset."
         rng = random.Random(seed) if seed is not None else random
@@ -696,7 +1026,7 @@ class OnlineAudioDataset(AudioDataset):
             if features is None:
                 file_partitions = self._split_without_feature(partitions, rng=rng)
             else:
-                file_partitions = self._split_with_features(partitions, checklist(features), tolerance=tolerance, balance_cardinality=balance_cardinality, rng=rng)
+                file_partitions = self._split_with_features(partitions, checklist(features), tolerance=tolerance, balance_cardinality=balance_cardinality, rng=rng, n_bins=n_bins)
 
         partitions = {k: self.get_subdataset(v) for k, v in file_partitions.items()}
         if write: 
@@ -718,6 +1048,96 @@ class OnlineAudioDataset(AudioDataset):
                 logging.warning("partition %s : %d files not found in dataset"%(p, len(missing)))
             partitions[p] = self.get_subdataset([file_map[a] for a in audio_paths if a in file_map])
         return partitions
+
+
+    # conversion to pre-processed datasets
+
+    def list_partitions(self) -> List[str]:
+        """names of written partitions."""
+        return sorted(f.stem for f in Path(self.partition_dir).glob("*.json")) if Path(self.partition_dir).is_dir() else []
+
+    def _estimate_db_size(self, files, hop_samples: int, waveform: bool) -> float:
+        """size (Gb) allocated to the pre-processed database : int16 audio of overlapping chunks, with a margin for features."""
+        duration = sum(f['duration'] for f in files)
+        channels = self._n_channels or max(f['channels'] for f in files)
+        audio_bytes = duration * self.sr * channels * 2 * (self.chunk_length / hop_samples) if waveform else 0.
+        return max(1., 4 * audio_bytes / 1024 ** 3)
+
+    def preprocess(self, out: str | Path, hop_length: int | float | None = None, partitions: bool | List[str] | None = True, 
+                   exclude_flags: List[str] | None = None, health_thresholds: Dict[str, float] | None = None, features = None, 
+                   waveform: bool = True, preset: str = "default", override: List[str] | None = None, max_db_size: float | None = None, 
+                   force: bool = False, compact: bool = False, device: str | None = None, check: bool = False, **dataset_kwargs: Any):
+        """compiles the dataset into a pre-processed dataset, with the same files, parsing settings and features, and returns 
+        it (as a PreprocessedAudioDataset, with the output pattern and transforms of this dataset).
+
+        Args:
+            out (str | Path): folder of the pre-processed dataset.
+            hop_length (int | float | None, optional): hop between pre-processed chunks, in samples (int) or seconds (float) ; 
+                half of chunk_length if None (as preprocess_dataset). Defaults to None.
+            partitions (bool | List[str] | None, optional): written partitions carried to the pre-processed dataset (all of 
+                them if True), matching files by audio paths. Defaults to True.
+            exclude_flags (List[str] | None, optional): files with these health flags (e.g. ["silent", "clipping"], see 
+                acids_dataset.health) are excluded ; health is computed on every file. Defaults to None.
+            features (optional): features computed in the pre-processed dataset ; the features of this dataset if None.
+            waveform (bool, optional): store audio in the pre-processed dataset. Defaults to True.
+            preset (str, optional): preset of other parsing parameters (sampling rate, channels and chunk length are the ones of 
+                this dataset). Defaults to "default".
+            override (List[str] | None, optional): additional gin bindings. Defaults to None.
+            max_db_size (float | None, optional): size of the database (Gb) ; estimated from durations if None. Defaults to None.
+            **dataset_kwargs: additional arguments of the returned dataset.
+
+        Files known as unreadable by the index are not parsed. Chunks are padded with the padding mode of this dataset, and 
+        chunks below its loudness_threshold are discarded. The source of the dataset is recorded in its metadata.
+        """
+        from ..preprocess import preprocess_dataset
+        from .simple import PreprocessedAudioDataset
+        if self._chunk_length is None:
+            raise ValueError("pre-processed datasets require a chunk_length (give it in constructor or configure)")
+        if self.sr is None:
+            raise ValueError("files have different sampling rates ; please provide sr to dataset")
+        files = [self._files[i] for i in self.file_indices]
+        excluded = []
+        if exclude_flags:
+            from ..health import dataset_health
+            report = dataset_health(self, thresholds=health_thresholds)
+            flagged = {r['audio_path'] for r in report['files'] if set(r['flags']) & set(exclude_flags)}
+            excluded = sorted(f['audio_path'] for f in files if f['audio_path'] in flagged)
+            files = [f for f in files if f['audio_path'] not in flagged]
+        if len(files) == 0:
+            raise ValueError("no file to pre-process")
+        hop_samples = chunk_length_to_samples(hop_length, self.sr) if hop_length is not None else self.chunk_length // 2
+        overrides = ["RawParser.pad_mode = '%s'"%self._pad_mode.name.lower()]
+        if self.loudness_threshold is not None:
+            overrides.append("RawParser.loudness_threshold = %r"%self.loudness_threshold)
+        source = {'type': "online", 'paths': [str(p) for p in self._paths], 
+                  'indexes': [str(self.index_path(p)) for p in self._paths if self.index_path(p).exists()], 
+                  'filters': list(self._filters), 'exclude': list(self._exclude), 'meta_regexp': list(self._meta_regexp), 
+                  'excluded_files': excluded, 'invalid_files': list(self.invalid_files), 'pad_mode': self._pad_mode.name.lower(), 
+                  'loudness_threshold': self.loudness_threshold}
+        preprocess_dataset([str(p) for p in self._paths], out=out, preset=preset, chunk_length=int(self.chunk_length), hop_length=int(hop_samples), 
+                           sample_rate=int(self.sr), channels=self._n_channels, features=list(self._features if features is None else features), 
+                           meta_regexp=list(self._meta_regexp), waveform=waveform, override=overrides + list(override or []), 
+                           max_db_size=max_db_size or self._estimate_db_size(files, hop_samples, waveform), force=force, compact=compact, 
+                           check=check, device=device, files=[f['path'] for f in files], metadata={'source': source})
+        # arguments of the returned dataset default to the ones of this dataset
+        dataset_kwargs = {'output_pattern': self.output_pattern, 'transforms': self.transforms, 
+                          'channels': self._n_channels if self._n_channels is not None else 1, **dataset_kwargs}
+        dataset = PreprocessedAudioDataset(out, **dataset_kwargs)
+        names = self.list_partitions() if partitions is True else list(partitions or [])
+        for name in names:
+            self._transfer_partition(name, dataset)
+        return dataset
+
+    def _transfer_partition(self, name: str, dataset) -> None:
+        """writes a partition of this dataset in a pre-processed dataset, matching files by audio paths."""
+        with open(self._partition_path(name), "r") as f:
+            file_partitions = json.load(f)
+        path_keys = dataset.feature_hash['original_path']
+        partitions = {}
+        for p, audio_paths in file_partitions.items():
+            keys = sorted({dataset._key_to_str(k) for a in audio_paths for k in path_keys.get(a, [])})
+            partitions[p] = dataset.get_subdataset([dataset._loader.keygen.from_str(k) for k in keys])
+        dataset._write_partition(partitions, name)
 
 
 __all__ = ['OnlineAudioDataset']

@@ -11,14 +11,19 @@ from ..utils import loudness, frame_with_pad
 
 @gin.configurable(module="features")
 class Loudness(AcidsDatasetFeature):
+    supports_batch = True
     def __init__(
             self, 
             frame_length: int | None = None,
             keep_channels: bool = True,
             sr: int = 44100, 
+            min_loudness: float | None = -70.,
             **kwargs
     ):
+        """Loudness (LUFS), per frame if frame_length is given. Values are floored to min_loudness (by default -70 LUFS, 
+        the absolute gate of loudness measurements), such that silence does not give -inf ; None keeps -inf for silence."""
         super().__init__(**kwargs)
+        self.min_loudness = min_loudness
         self.frame_length = frame_length
         self.sr = sr
         self.keep_channels = keep_channels
@@ -47,10 +52,14 @@ class Loudness(AcidsDatasetFeature):
 
     def __call__(self, data) -> torch.Tensor:
         data_loudness = loudness(data, sample_rate=self.sr, frame_length=self.frame_length, keep_channels=self.keep_channels)
+        # features pickled before min_loudness have no floor
+        min_loudness = getattr(self, "min_loudness", None)
+        if min_loudness is not None:
+            data_loudness = data_loudness.clamp(min=min_loudness)
         return data_loudness
 
     def script(self):
-        return LoudnessScript(frame_length=self.frame_length, sr=self.sr, keep_channels=self.keep_channels)
+        return LoudnessScript(frame_length=self.frame_length, sr=self.sr, keep_channels=self.keep_channels, min_loudness=getattr(self, "min_loudness", None))
 
 
 class LoudnessScript(torch.nn.Module):
@@ -59,6 +68,7 @@ class LoudnessScript(torch.nn.Module):
     frame_length: Optional[int]
     sr: int
     keep_channels: bool
+    min_loudness: Optional[float]
     hs_b0: float
     hs_b1: float
     hs_b2: float
@@ -75,8 +85,10 @@ class LoudnessScript(torch.nn.Module):
         frame_length: int | None = None,
         keep_channels: bool = True,
         sr: int = 44100,
+        min_loudness: Optional[float] = -70.,
     ):
         super().__init__()
+        self.min_loudness = min_loudness
         self.frame_length = frame_length
         self.sr = sr
         self.keep_channels = keep_channels
@@ -215,4 +227,7 @@ class LoudnessScript(torch.nn.Module):
             else:
                 LKFS = LKFS.squeeze(0)
 
+        min_loudness = self.min_loudness
+        if min_loudness is not None:
+            LKFS = LKFS.clamp(min=min_loudness)
         return LKFS

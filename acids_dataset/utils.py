@@ -181,6 +181,27 @@ class GinEnv(object):
         gin.config.__dict__.update(self._dict)
 
 
+def _k_weighting_coefficients(sr: float):
+    """(b, a) coefficients of the two biquads of K-weighting (ITU-R BS.1770) : high shelf (+4 dB at 1500 Hz) and 
+    high-pass (38 Hz), as in torchaudio treble_biquad and highpass_biquad."""
+    gain, cf, Q = 4.0, 1500.0, 1.0 / math.sqrt(2.0)
+    w0 = 2.0 * math.pi * cf / sr
+    A = 10.0 ** (gain / 40.0)
+    alpha = math.sin(w0) / (2.0 * Q)
+    shelf_b = [A * ((A + 1) + (A - 1) * math.cos(w0) + 2.0 * math.sqrt(A) * alpha), 
+               -2.0 * A * ((A - 1) + (A + 1) * math.cos(w0)), 
+               A * ((A + 1) + (A - 1) * math.cos(w0) - 2.0 * math.sqrt(A) * alpha)]
+    shelf_a = [(A + 1) - (A - 1) * math.cos(w0) + 2.0 * math.sqrt(A) * alpha, 
+               2.0 * ((A - 1) - (A + 1) * math.cos(w0)), 
+               (A + 1) - (A - 1) * math.cos(w0) - 2.0 * math.sqrt(A) * alpha]
+    w0 = 2.0 * math.pi * 38.0 / sr
+    alpha = math.sin(w0) / (2.0 * 0.5)
+    hp_b = [(1.0 + math.cos(w0)) / 2.0, -(1.0 + math.cos(w0)), (1.0 + math.cos(w0)) / 2.0]
+    hp_a = [1.0 + alpha, -2.0 * math.cos(w0), 1.0 - alpha]
+    normalize = lambda b, a: ([x / a[0] for x in b], [x / a[0] for x in a])
+    return [normalize(shelf_b, shelf_a), normalize(hp_b, hp_a)]
+
+
 def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None = None, keep_channels: bool = False):
     r"""
     Custom extension of torchaudio loudness, allowing loudness computation for small chunks.
@@ -230,8 +251,10 @@ def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None 
         waveform = waveform.reshape(B, C, T)
 
     # --- K-weighting ---
-    waveform = torchaudio.functional.treble_biquad(waveform, sample_rate, 4.0, 1500.0, 1 / math.sqrt(2))
-    waveform = torchaudio.functional.highpass_biquad(waveform, sample_rate, 38.0, 0.5)
+    # filtered without clamping (torchaudio biquads clamp outputs to [-1, 1], that biases the loudness of loud signals)
+    for b, a in _k_weighting_coefficients(sample_rate):
+        waveform = torchaudio.functional.lfilter(waveform, torch.tensor(a, dtype=waveform.dtype, device=waveform.device), 
+                                                 torch.tensor(b, dtype=waveform.dtype, device=waveform.device), clamp=False)
 
     gate_duration = min(0.4, waveform.size(-1) / sample_rate)
     overlap = 0.75
@@ -369,17 +392,31 @@ def get_available_cuda_device():
     return torch.device('cuda')
 
 
+def env_flag(name: str, default: bool) -> bool:
+    """boolean value of an environment variable ("0", "false", "no", "off" and "" are False), default if not set."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 def get_default_accelerated_device():
-    cuda_available = os.environ.get('USE_CUDA', True) and torch.cuda.is_available()
-    if cuda_available:
-        if os.environ.get('CUDA_AVAILABLE_DEVICES'):
-            get_available_cuda_device()
-        else:
-            return torch.device('cuda')
-    mps_available = os.environ.get('USE_MPS', False) and torch.mps.is_available()
-    if mps_available: 
+    """accelerated device used with device="auto" : CUDA if available (unless USE_CUDA=0), MPS if available and 
+    USE_MPS=1, and CPU otherwise. CUDA devices can be selected with CUDA_VISIBLE_DEVICES."""
+    if env_flag('USE_CUDA', True) and torch.cuda.is_available():
+        return get_available_cuda_device()
+    if env_flag('USE_MPS', False) and torch.backends.mps.is_available():
         return torch.device('mps')
     return torch.device('cpu')
+
+
+def resolve_device(device=None) -> torch.device:
+    """device of features : CPU if None, the default accelerated device if "auto" (see get_default_accelerated_device)."""
+    if device is None:
+        return torch.device('cpu')
+    if isinstance(device, str) and device == "auto":
+        return get_default_accelerated_device()
+    return torch.device(device)
 
 def get_accelerated_device(accelerator = None):
     if accelerator == "cpu":
@@ -521,7 +558,7 @@ def frame_with_pad(x: torch.Tensor, frame_length: int, hop_size: int) -> torch.T
 
 def match_loudness(signal, target_signal, sr):
     if signal.ndim == 3: 
-        return torch.stack(0, map(match_loudness, signal))
+        return torch.stack([match_loudness(s, t, sr) for s, t in zip(signal, target_signal)])
     current_loudness = torchaudio.functional.loudness(signal, sr)
     target_loudness = torchaudio.functional.loudness(target_signal, sr)
     return torchaudio.functional.gain(signal, target_loudness - current_loudness)
@@ -541,7 +578,12 @@ def get_subclasses_from_package(package, filter_class, exclude = []):
         if mod.__name__ in exclude: pass
         for name, obj in inspect.getmembers(mod):
             if isinstance(obj, type):
-                if issubclass(obj, filter_class) and (obj not in transform_list):
+                # generic aliases (e.g. list[int]) are instances of type in Python 3.10, but not classes
+                try:
+                    is_subclass = issubclass(obj, filter_class)
+                except TypeError:
+                    continue
+                if is_subclass and (obj not in transform_list):
                     transform_list.append(obj)
     return transform_list
 

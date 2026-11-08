@@ -8,11 +8,10 @@ dynamic = ["version"]
 authors = [
   { name="Axel Chemla Romeu Santos", email="chemla@ircam.fr" },
   { name="Nils Demerlé", email="demerle@ircam.fr" },
-  { name="Antoine Caillon" }
 ]
-description = "a pre-processing & dataloading library for generative audio ML"
+description = "a fancy data & data loader manager for generative audio ML. Enables pre-processing, advanced loading, audio features & augmentations, balance & partitioning, curriculum learning."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -27,12 +26,13 @@ dependencies = [
     "lmdb",
     "tqdm",
     "dill",
-    "numpy==2.1",
-    "scipy==1.15.2",
-    "scikit-learn==1.6.1",
-    "librosa==0.10.2",
+    "numpy>=1.23.5",
+    "scipy>=1.8",
+    "scikit-learn>=1.0.2",
+    "librosa>=0.10.2",
     "torch",
     "torchaudio",
+    "torchcodec",
     "soundfile>=0.12",
     "pytorch_lightning",
     "pydub",
@@ -44,7 +44,8 @@ dependencies = [
     "pretty_midi",
     "einops",
     "rotary_embedding_torch",
-    "audiomentations"
+    "audiomentations",
+    "acids-transforms @ git+https://github.com/acids-ircam/acids-transforms"
 ]
 
 [project.scripts]
@@ -54,11 +55,26 @@ acids-dataset = "acids_dataset.cli:main"
 Homepage = "https://github.com/acids-ircam/acids-dataset"
 Issues = "https://github.com/acids-ircam/acids-dataset/issues"
 
+[tool.setuptools.packages.find]
+# only acids_dataset is packaged (other top-level folders, e.g. assets or docs, are not packages)
+include = ["acids_dataset*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "acids_dataset.version.__version__"}
+
 [tool.setuptools.package-data]
-acids_dataset = ["configs/*.gin", "transforms/basic_pitch_torch/assets/*.pth"]
+acids_dataset = ["configs/*.gin", "configs/features/*.gin", "configs/transforms/*.gin", "transforms/basic_pitch_torch/assets/*.pth"]
 
 [project.optional-dependencies]
 pesto = ["pesto-pitch"]
 crepe = ["torchcrepe"]
 pyworld = ["pyworld"]
 ui = ["gradio>=4", "matplotlib"]
+docs = ["mkdocs>=1.6,<2", "mkdocs-material>=9.5", "mkdocstrings[python]>=0.26",
+        # mkdocstrings < 1.0.8 (the last versions for Python 3.10) are not compatible with pymdown-extensions 12
+        "pymdown-extensions<12; python_version < '3.11'"]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: long parametrized grids (deselect with -m \"not slow\")",
+]

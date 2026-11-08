@@ -86,6 +86,12 @@ def parse_preset(preset: str | Path | None = None, overrides: List[str] = [], va
     values = {k: v for k, v in (values or {}).items() if v is not None}
     for p in preset_paths():
         gin.add_config_file_search_path(str(p))
+    # gin constants take precedence over the values of presets : constants left by previous configurations (e.g. 
+    # set_gin_constant, or preprocess_dataset with keep_gin_constants) are removed, such that presets give their 
+    # values. Callers parse presets in a GinEnv, that restores previous constants at exit.
+    for name in PRESET_VALUES:
+        if name in gin.config._CONSTANTS:
+            gin.config._CONSTANTS.pop(name)
     if set_constants:
         # retro-compatibility : configs may refer to values defined as gin constants
         for k, v in values.items():

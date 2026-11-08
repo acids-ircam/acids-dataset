@@ -40,6 +40,14 @@ def import_flags():
     flags.DEFINE_boolean('compact', False, help="create compact version of lmdb database")
     flags.DEFINE_string('log', None, help="log file")
 
+def _files_parser(files: List[str]):
+    """dir_parser of writers that gives the files of a list that are in a folder."""
+    def dir_parser(path, valid_exts=None, flt=None, exclude=None):
+        root = Path(path).resolve()
+        return [f for f in files if Path(f).is_relative_to(root)]
+    return dir_parser
+
+
 def get_default_output_path(path):
     return (Path(".") / f"{path.stem}_preprocessed").resolve().absolute()
 
@@ -65,10 +73,14 @@ def preprocess_dataset(
     compact: bool = False, 
     log: str | None = None, 
     keep_gin_constants: bool = False,
-    preset: str | None = None
+    preset: str | None = None,
+    files: List[str] | None = None,
+    metadata: dict | None = None
     ):
     """pre-processes audio folders with a preset (see acids_dataset.presets). Given values (chunk_length, sample_rate, 
-    channels, ...) override the ones of the preset ; preset can also be given with the config keyword."""
+    channels, ...) override the ones of the preset ; preset can also be given with the config keyword. If files is given, 
+    only these audio files (absolute paths in the given folders) are parsed, instead of the files found in folders ; 
+    metadata is recorded in the metadata of the dataset."""
     preset = preset or config
     with GinEnv(keep_constants=keep_gin_constants):
         path = list(map(Path, checklist(path)))
@@ -99,6 +111,9 @@ def preprocess_dataset(
 
         gin.finalize() 
         writer_class = get_writer_class(filters=flt, exclude=exclude)
+        writer_kwargs = {}
+        if files is not None:
+            writer_kwargs['dir_parser'] = _files_parser([str(Path(f).resolve()) for f in files])
         writer = writer_class(path, 
                             out, 
                             features=operative_features, 
@@ -106,8 +121,10 @@ def preprocess_dataset(
                             force=force, 
                             waveform=waveform, 
                             max_db_size=max_db_size, 
-                            log=log) 
+                            log=log, 
+                            **writer_kwargs) 
         writer.metadata['preset'] = str(preset)
+        writer.metadata.update(metadata or {})
         writer.build(compact=compact)
 
 def main(argv):

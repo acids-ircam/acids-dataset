@@ -393,11 +393,10 @@ def test_sampling_rate(tmp_path):
 def test_loading_params(durations_dataset):
     root, durations = durations_dataset
     ds = OnlineAudioDataset(root)
-    assert ds.chunk_length is None and ds.batch_by is None
-    with pytest.raises(ValueError):
-        len(ds)
-    with pytest.raises(ValueError):
-        ds[0]
+    # without chunk_length, items are whole files
+    assert ds.chunk_length is None and ds.batch_by == "files"
+    assert len(ds) == len(durations)
+    assert [ds[i].shape[-1] for i in range(len(ds))] == [f['n_frames'] for f in ds.files]
     configured = ds.configure(chunk_length=1., batch_by="dataset", pad_mode="reflect")
     # configure returns a copy
     assert configured is not ds and ds.chunk_length is None
@@ -720,3 +719,63 @@ def test_feature_dict(instrument_dataset):
     # dict features with presets
     ds = AudioDataset(instrument_dataset, preset="rave", features={'l': Loudness()}, write_index=False)
     assert [f.feature_name for f in ds.features] == ["l"]
+
+
+# whole files (no chunk_length)
+
+def test_whole_files(durations_dataset):
+    root, durations = durations_dataset
+    ds = OnlineAudioDataset(root, write_index=False)
+    assert len(ds) == len(durations) and ds.batch_by == "files"
+    assert [ds[i].shape[-1] for i in range(len(ds))] == [int(d * SR) for d in durations]
+    assert ds.chunk_position(1) == (1, 0.)
+    # whole files cannot be batched
+    with pytest.raises(ValueError):
+        ds.get_loader(batch_size=2)
+    loader = ds.get_loader(batch_size=1, shuffle=False)
+    assert [b.shape[-1] for b in loader] == [int(d * SR) for d in durations]
+    assert len(ds.get_loader(batch_size=2, shuffle=False, collate_fn=list)) == 2
+    # partitions keep whole files ; chunk_length can be given later
+    partitions = ds.split({"train": 0.5, "valid": 0.5}, seed=0)
+    assert sum(len(p) for p in partitions.values()) == len(durations)
+    assert len(ds.configure(chunk_length=1., batch_by="dataset")) == sum(max(1, round(d)) for d in durations)
+
+
+def test_whole_files_mixed_sample_rates(tmp_path):
+    write_audio(tmp_path / "a.wav", SR, sr=44100)
+    write_audio(tmp_path / "b.wav", 48000, sr=48000)
+    ds = OnlineAudioDataset(tmp_path, write_index=False)
+    # without sr, files are loaded at their sampling rate
+    assert len(ds) == 2 and ds[0].shape[-1] == SR and ds[1].shape[-1] == 48000
+
+
+# silence
+
+def test_loudness_threshold(tmp_path):
+    # files : 1s of silence, 1s of noise, 1s of silence
+    x = torch.zeros(1, 3 * SR)
+    x[:, SR:2 * SR] = 0.1 * torch.randn(1, SR)
+    write_audio(tmp_path / "a.wav", 3 * SR)
+    torchaudio.save(str(tmp_path / "a.wav"), x, sample_rate=SR)
+    plain = OnlineAudioDataset(tmp_path, chunk_length=SR // 4, batch_by="files", write_index=False)
+    filtered = OnlineAudioDataset(tmp_path, chunk_length=SR // 4, batch_by="files", loudness_threshold=-50, max_retries=50, write_index=False)
+    plain_silent = sum(float(plain[0].abs().max()) == 0 for _ in range(40))
+    filtered_silent = sum(float(filtered[0].abs().max()) == 0 for _ in range(40))
+    assert plain_silent > 10 and filtered_silent == 0
+    assert filtered.metadata['loudness_threshold'] == -50
+    # whole files are never redrawn ; silent files give silent chunks after max_retries
+    torchaudio.save(str(tmp_path / "a.wav"), torch.zeros(1, SR), sample_rate=SR)
+    silent = OnlineAudioDataset(tmp_path, chunk_length=SR // 4, loudness_threshold=-50, max_retries=3, rescan=True, write_index=False)
+    assert silent[0].abs().max() == 0
+
+
+def test_loudness_floor():
+    from acids_dataset.features.loudness import LoudnessScript
+    silence = torch.zeros(1, SR)
+    assert float(Loudness(sr=SR, keep_channels=False)(silence)) == -70.
+    assert float(Loudness(sr=SR, keep_channels=False, min_loudness=None)(silence)) == float("-inf")
+    assert float(Loudness(sr=SR, keep_channels=False, min_loudness=-90.)(silence)) == -90.
+    scripted = torch.jit.script(Loudness(sr=SR, frame_length=512).script())
+    assert torch.all(scripted(silence) == -70.)
+    noise = 0.1 * torch.randn(1, SR)
+    assert float(Loudness(sr=SR, keep_channels=False)(noise)) > -70.

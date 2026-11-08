@@ -18,6 +18,8 @@ def import_flags():
     flags.DEFINE_boolean('check_metadata', False, 'check metadata discrepencies in dataset')
     flags.DEFINE_multi_integer('idx', [], 'parses fragment with idx %s (file index for raw audio folders)')
     flags.DEFINE_multi_string('key', [], 'parses fragment with key %s (audio path for raw audio folders)')
+    flags.DEFINE_boolean('health', False, 'health report of files (clipping, DC offset, silence, level)')
+    flags.DEFINE_integer('health_max_files', None, 'maximum number of files of the health report')
     # raw audio folders
     flags.DEFINE_boolean('write_index', None, 'raw audio folders : write the .ad index file (asked if not given)')
     flags.DEFINE_string('index_dir', None, 'raw audio folders : folder of index files (default : in the dataset folder)')
@@ -28,6 +30,24 @@ def import_flags():
 
 
 separator = '-'*10
+
+
+def print_health(dataset, max_files=None):
+    """prints the health report of a dataset (see acids_dataset.health) : summary and flagged files."""
+    from acids_dataset.health import dataset_health
+    report = dataset_health(dataset, max_files=max_files, progress=True)
+    print(separator)
+    print('health')
+    pprint(report['summary'], sort_dicts=False)
+    flagged = [r for r in report['files'] if r['flags']]
+    if flagged:
+        print('flagged files :')
+        for r in flagged:
+            print(f"{r['audio_path']}: {', '.join(r['flags'])} (peak {r['peak_db']:.1f} dB, clipping {r['clipping_ratio']:.2e}, "
+                  f"dc {r['dc_offset']:.3f}, silence {r['silence_ratio']:.2f})")
+    else:
+        print('no flagged file.')
+    return report
 
 
 def ask_yes_no(question: str) -> bool:
@@ -185,10 +205,15 @@ def main(argv):
     from acids_dataset.datasets import is_preprocessed_path
     if is_preprocessed_path(FLAGS.path):
         info_preprocessed(FLAGS.path, files=FLAGS.files, check_metadata=FLAGS.check_metadata, idx=FLAGS.idx, key=FLAGS.key)
+        if FLAGS.health:
+            from acids_dataset.datasets import AudioDataset
+            print_health(AudioDataset(FLAGS.path), max_files=FLAGS.health_max_files)
     else:
-        info_online(FLAGS.path, write_index=FLAGS.write_index, index_dir=FLAGS.index_dir, meta_regexp=FLAGS.meta_regexp,
-                    filters=FLAGS.filter, exclude=FLAGS.exclude, rescan=FLAGS.rescan, files=FLAGS.files,
-                    check_metadata=FLAGS.check_metadata, idx=FLAGS.idx, key=FLAGS.key)
+        dataset = info_online(FLAGS.path, write_index=FLAGS.write_index, index_dir=FLAGS.index_dir, meta_regexp=FLAGS.meta_regexp,
+                              filters=FLAGS.filter, exclude=FLAGS.exclude, rescan=FLAGS.rescan, files=FLAGS.files,
+                              check_metadata=FLAGS.check_metadata, idx=FLAGS.idx, key=FLAGS.key)
+        if FLAGS.health:
+            print_health(dataset, max_files=FLAGS.health_max_files)
 
 
 if __name__ == "__main__":

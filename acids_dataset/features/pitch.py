@@ -100,6 +100,17 @@ def _zero_pad_to(audio: np.ndarray, length: int) -> np.ndarray:
     return np.pad(audio, pad_width, mode="constant")
 
 
+def _align_frames(values: np.ndarray, audio_length: int, frame_length: int, hop_length: int, analysis_length: int, center: bool) -> np.ndarray:
+    """selects the analysis frames (last axis) whose centers match the output frames : output frame j covers samples 
+    [j * hop, j * hop + frame_length], and analysis frame k is centered on k * hop (center=True), or on 
+    k * hop + analysis_length / 2 (center=False)."""
+    n_target = max(1, (audio_length - frame_length) // hop_length + 1)
+    offset = frame_length / (2 * hop_length) if center else (frame_length - analysis_length) / (2 * hop_length)
+    # halves are rounded up (np.round rounds to even), towards frames inside the signal
+    index = np.clip(np.floor(np.arange(n_target) + offset + 0.5).astype(int), 0, values.shape[-1] - 1)
+    return values[..., index]
+
+
 def _reframe_pitch_out(f0_array: np.ndarray | torch.Tensor, audio_array: np.ndarray | torch.Tensor, frame_length: int, win_length: int, hop_length: int) -> torch.Tensor | np.ndarray:
     target_size = math.floor((audio_array.shape[-1] - frame_length) / hop_length) + 1
     if torch.is_tensor(f0_array):
@@ -113,6 +124,7 @@ def _reframe_pitch_out(f0_array: np.ndarray | torch.Tensor, audio_array: np.ndar
 @gin.configurable(module="features")
 class F0(AcidsDatasetFeature):
     _valid_modes_ = _AD_F0_METHODS
+    supports_batch = True
     gin_configs = _configs
     default_frame_length = 512
     def __init__(
@@ -173,14 +185,14 @@ class F0(AcidsDatasetFeature):
                 'center': kwargs.get('center', True),
                 'pad_mode': kwargs.get('pad_mode', 'constant')
             }
+            # librosa frames are centered (with padding) : output frames take the analysis frames with the same centers
+            align = lambda x: _align_frames(np.asarray(x), audio.shape[-1], add_kwargs['frame_length'], add_kwargs['hop_length'], 
+                                            analysis_kwargs['frame_length'], analysis_kwargs['center'])
             if mode == "yin":
-                f0 = librosa.yin(audio, sr=sr, **analysis_kwargs)
-                f0 = _reframe_pitch_out(f0_array=f0, audio_array=audio, frame_length=add_kwargs['frame_length'], win_length=add_kwargs['frame_length'], hop_length=add_kwargs['hop_length'])
+                f0 = align(librosa.yin(audio, sr=sr, **analysis_kwargs))
             elif mode == "pyin":
                 f0, voiced_flag, voiced_prob = librosa.pyin(audio, sr=sr, **analysis_kwargs)
-                f0 = _reframe_pitch_out(f0_array=f0, audio_array=audio, frame_length=add_kwargs['frame_length'], win_length=add_kwargs['frame_length'], hop_length=add_kwargs['hop_length'])
-                voiced_prob = _reframe_pitch_out(f0_array=voiced_flag, audio_array=audio, frame_length=add_kwargs['frame_length'], win_length=add_kwargs['frame_length'], hop_length=add_kwargs['hop_length'])
-                f0 = np.stack([f0, voiced_prob], axis=-2)
+                f0 = np.stack([align(f0), align(voiced_flag)], axis=-2)
         elif mode == "crepe": 
             add_kwargs = {
                 "decoder": kwargs.get('decoder', 'viterbi'), 
@@ -204,17 +216,24 @@ class F0(AcidsDatasetFeature):
                                     hop_length=add_kwargs['hop_length'])
             f0 = f0.reshape(*batch_size, f0.shape[-1]).numpy()
         elif mode == "pesto": 
+            hop_length = kwargs.get('hop_length') or cls.default_frame_length
             add_kwargs = {
-                "step_size": (kwargs.get('hop_length') or cls.default_frame_length) / sr,
+                # pesto step sizes are in milliseconds
+                "step_size": hop_length / sr * 1000,
                 'model_name': kwargs.get('model', "mir-1k_g7"),
                 'reduction': kwargs.get('reduction', 'alwa'),
                 'num_chunks': kwargs.get('num_chunks', 8), 
                 'convert_to_freq': kwargs.get('convert_to_freq', True)
             }
-            audio = torch.from_numpy(audio).float().reshape(-1, audio.shape[-1]) # type: ignore
-            if device is not None: audio = audio.to(device)
-            out = pesto.predict(audio, sr, **add_kwargs)
-            f0 = torch.cat([out[0][None], out[1], out[2]], dim=0)
+            batch_shape = audio.shape[:-1]
+            audio_t = torch.from_numpy(np.asarray(audio)).float().reshape(-1, audio.shape[-1]) # type: ignore
+            if device is not None: audio_t = audio_t.to(device)
+            _, preds, confidence, _ = pesto.predict(audio_t, sr, **add_kwargs)
+            # (f0, confidence) along the before-last axis, as pyin
+            f0 = torch.stack([preds, confidence], dim=-2).cpu().numpy()
+            f0 = np.stack([_reframe_pitch_out(f0[:, i], audio, frame_length=kwargs.get('frame_length') or cls.default_frame_length, 
+                                              win_length=hop_length, hop_length=hop_length) for i in range(2)], axis=-2)
+            f0 = f0.reshape(*batch_shape, 2, f0.shape[-1])
         elif mode == "world": 
             f0 = []
             if audio.ndim == 1: audio = audio[None]
@@ -300,7 +319,7 @@ class F0(AcidsDatasetFeature):
             raise NotImplementedError('mode %s not available for scripting'%self.mode)
 
     def __call__(self, x):
-        out = self.predict(x.numpy(), self.mode, self.sr, device=self.device, **self.kwargs)
+        out = self.predict(x.detach().cpu().numpy(), self.mode, self.sr, device=self.device, **self.kwargs)
         out = torch.from_numpy(out).to(x)
         return out
 
@@ -341,7 +360,8 @@ class Pitch(F0):
     
     def hash_from_feature(self, meta): 
         if self.mode in ["pyin", "pesto"]:
-            pitch = Counter(meta[0].flatten().tolist()).most_common(1)[0][0]
+            # pitch classes are on the first row of (..., 2, frames) outputs (the second row is voicing)
+            pitch = Counter(np.asarray(meta)[..., 0, :].flatten().tolist()).most_common(1)[0][0]
         else:
             pitch = Counter(meta.flatten().tolist()).most_common(1)[0][0]
         return Pitch.note_hash()[pitch]
@@ -354,7 +374,7 @@ class Pitch(F0):
 
 
     def __call__(self, x):
-        out = self.predict(x.numpy(), self.mode, self.sr, device=self.device, **self.kwargs)
+        out = self.predict(x.detach().cpu().numpy(), self.mode, self.sr, device=self.device, **self.kwargs)
         out = torch.from_numpy(out).to(x.device)
         return out
 

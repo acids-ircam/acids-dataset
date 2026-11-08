@@ -29,7 +29,10 @@ additional_args = {
      "moduleembedding": ((ModuleTest(),), {})
 }
 
- 
+# features defined on stereo signals only, computed on stereo datasets
+stereo_features = {"midside"}
+
+
 @pytest.mark.parametrize('config', ['rave.gin'])
 @pytest.mark.parametrize("dataset", ["simple"])
 @pytest.mark.parametrize("feature", get_available_features())
@@ -37,7 +40,7 @@ def test_update_dataset_features(config, dataset, feature, test_name, test_k = 1
     gin.clear_config()
     # test writing
     set_gin_constant('SAMPLE_RATE', 44100)
-    set_gin_constant('CHANNELS', 1)
+    set_gin_constant('CHANNELS', 2 if feature.stem in stereo_features else 1)
     set_gin_constant('DEVICE', "cpu")
     gin.parse_config_file(config)
     dataset_path = get_dataset(dataset)

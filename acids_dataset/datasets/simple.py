@@ -17,7 +17,9 @@ from .base import AudioDataset, TransformType, chunk_length_to_samples
 
 @gin.configurable(module="datasets")
 class PreprocessedAudioDataset(AudioDataset):
-    """AudioDataset loading fragments from a pre-processed dataset folder (see preprocess_dataset)."""
+    """AudioDataset loading fragments from a pre-processed dataset folder (see preprocess_dataset). Pre-processed features
+    are read from the database, and describe the original audio ; features_after_transforms only applies to batch features
+    (see get_loader)."""
     _default_partition_name = "partitions"
 
     @classmethod
@@ -46,6 +48,7 @@ class PreprocessedAudioDataset(AudioDataset):
                  parent = None,
                  max_samples: int | None = None,
                  db_path: str | None = None,
+                 features_after_transforms: bool = True,
                  **kwargs) -> None:
         # db_path kept for retro-compatibility
         path = path or db_path
@@ -55,7 +58,8 @@ class PreprocessedAudioDataset(AudioDataset):
         if lazy_paths:
             raise NotImplementedError()
         self._init_common(transforms=transforms, output_pattern=output_pattern, output_type=output_type, 
-                          channels=channels, subindices=subindices, max_samples=max_samples)
+                          channels=channels, subindices=subindices, max_samples=max_samples,
+                          features_after_transforms=features_after_transforms)
         self._loader = get_writer_class_from_path(path).loader(self._db_path, output_type=output_type) 
         self._metadata = get_metadata_from_path(path)
         self._required_fields = required_fields
@@ -82,10 +86,10 @@ class PreprocessedAudioDataset(AudioDataset):
             pass
         return self._loader[index]
 
-    def configure(self, chunk_length: int | float | None = None, **kwargs) -> "PreprocessedAudioDataset":
+    def configure(self, chunk_length: int | float | None = None, features_after_transforms: bool | None = None, **kwargs) -> "PreprocessedAudioDataset":
         if chunk_length is not None and chunk_length_to_samples(chunk_length, self._metadata['sr']) != self.chunk_length:
             raise ValueError("chunk_length of pre-processed datasets is fixed (here, %d samples)"%self.chunk_length)
-        return super().configure(**kwargs)
+        return super().configure(features_after_transforms=features_after_transforms, **kwargs)
 
     @property
     def chunk_length(self) -> int:
@@ -268,6 +272,25 @@ class PreprocessedAudioDataset(AudioDataset):
         subindices = {k: list(map(lambda x: self._loader._keys[x], subindices[k])) for k in subindices}
         return {k: self.get_subdataset(subindices[k]) for k in ratios.keys()}           
 
+    def item_labels(self, features, n_bins: int = 10):
+        from ..sampling import bin_values
+        keys = self._subindices if self._subindices is not None else self._loader._keys
+        keys = [self._key_to_str(k) for k in keys]
+        feature_hash = self._loader.feature_hash
+        per_feature = []
+        for f in checklist(features):
+            if f in feature_hash:
+                key_values = {}
+                for value, value_keys in feature_hash[f].items():
+                    for k in value_keys:
+                        key_values[self._key_to_str(k)] = value
+                per_feature.append([key_values.get(k) for k in keys])
+            elif f in self.features:
+                per_feature.append(bin_values([self._reduce_feature_value(self._loader[k].get(f)) for k in keys], n_bins=n_bins))
+            else:
+                raise ValueError("feature %s not present in dataset ; available features : %s"%(f, list(feature_hash.keys()) + list(self.features.keys())))
+        return self._combine_labels(per_feature)
+
     def _key_to_str(self, key) -> str:
         if isinstance(key, int):
             key = self._loader._keys[key]
@@ -281,7 +304,44 @@ class PreprocessedAudioDataset(AudioDataset):
             return None
         return set(map(self._key_to_str, self._subindices))
 
-    def _split_with_features(self, partitions, features, tolerance=0.1, balance_cardinality = False, rng=random):
+    def _sort_split_features(self, features) -> tuple:
+        """separates hashed (categorical) features from other stored (continuous) features."""
+        feature_hash = self._loader.feature_hash
+        categorical, continuous = [], []
+        for f in checklist(features):
+            if f in feature_hash: categorical.append(f)
+            elif f in self.features: continuous.append(f)
+            else: raise ValueError("feature %s not present in dataset ; available features : %s"%(f, list(feature_hash.keys()) + list(self.features.keys())))
+        if len(continuous) > 1:
+            raise ValueError("partitions can only be stratified over one continuous feature, got %s"%continuous)
+        return categorical, (continuous[0] if continuous else None)
+
+    def _split_stratified(self, partitions, partition_hash, feature_name, n_bins=10, rng=random):
+        """assigns groups of keys to partitions, stratified over the mean value of a continuous feature."""
+        labels, weights, values = [], [], []
+        n_missing = 0
+        for label, keys in partition_hash.items():
+            item_values = [self._reduce_feature_value(self._loader[k].get(feature_name)) for k in keys]
+            item_values = [v for v in item_values if np.isfinite(v)]
+            if not item_values:
+                n_missing += len(keys)
+                continue
+            labels.append(label)
+            weights.append(float(len(keys)))
+            values.append(float(np.mean(item_values)))
+        if n_missing > 0:
+            logging.warning("%d items have no finite value for feature %s, and are not partitioned"%(n_missing, feature_name))
+        assignment = self._assign_stratified(labels, weights, values, partitions, n_bins=n_bins, rng=rng)
+        subindices = {p: sorted(sum([list(partition_hash[l]) for l in assignment[p]], [])) for p in partitions.keys()}
+        return {p: self.get_subdataset(list(map(self._loader.keygen.from_str, subindices[p]))) for p in partitions.keys()}
+
+    def _split_with_features(self, partitions, features, tolerance=0.1, balance_cardinality = False, rng=random, n_bins=10):
+        features, continuous = self._sort_split_features(features)
+        if continuous is not None and len(features) == 0:
+            # items are stratified over the continuous feature
+            keys = self._current_keys()
+            keys = sorted(keys) if keys is not None else [self._key_to_str(k) for k in self._loader._keys]
+            return self._split_stratified(partitions, {(k,): {k} for k in keys}, continuous, n_bins=n_bins, rng=rng)
         # make partition hash : {(value_1, ..., value_n): set of keys (as str)}
         feature_hash = self._loader.feature_hash
         for f in features:
@@ -298,6 +358,9 @@ class PreprocessedAudioDataset(AudioDataset):
             if len(subset) > 0:
                 partition_hash[current_hash] = subset
 
+        if continuous is not None:
+            # groups of categorical features (e.g. original_path) are stratified over the continuous feature
+            return self._split_stratified(partitions, partition_hash, continuous, n_bins=n_bins, rng=rng)
         if balance_cardinality: 
             return self._split_with_features_balanced(partitions, partition_hash, features, tolerance=tolerance, rng=rng)
         else:
@@ -356,9 +419,12 @@ class PreprocessedAudioDataset(AudioDataset):
               balance_cardinality: bool = False, 
               tolerance: float = 0.1, 
               write: str | bool | None = None,
-              seed: int | None = None): 
+              seed: int | None = None,
+              n_bins: int = 10): 
         """splits the dataset in partitions. If seed is given, partitions are reproducible (e.g. identical across 
-        processes of distributed training) ; otherwise, they are drawn with the global random state."""
+        processes of distributed training) ; otherwise, they are drawn with the global random state. Features can be 
+        hashed (categorical) features, whose values are kept in a single partition, and at most one other (continuous) 
+        feature, over which partitions are stratified with n_bins histogram (quantile) bins."""
         assert not self.is_partition, "dataset is already a partition of an existing dataset."
         rng = random.Random(seed) if seed is not None else random
 
@@ -387,7 +453,7 @@ class PreprocessedAudioDataset(AudioDataset):
         if features is None:
             partitions = self._split_without_feature(_rng=rng, **partitions)
         else:
-            partitions = self._split_with_features(partitions, features, tolerance = tolerance, balance_cardinality=balance_cardinality, rng=rng)
+            partitions = self._split_with_features(partitions, features, tolerance = tolerance, balance_cardinality=balance_cardinality, rng=rng, n_bins=n_bins)
         if write:            self._write_partition(partitions, write)
         return partitions
 

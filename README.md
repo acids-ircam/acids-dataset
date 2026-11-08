@@ -1,5 +1,10 @@
 # acids-dataset
 
+[![Documentation](https://app.readthedocs.org/projects/acids-dataset/badge/?version=latest)](https://acids-transforms.readthedocs.io/en/latest/)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue.svg)](https://www.python.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-ee4c2c.svg?logo=pytorch&logoColor=white)](https://pytorch.org/)
+
+
 **Warning** `acids-dataset` is still experimental, do not hesitate to add issues! 
 
 `acids-dataset` is a preprocessing package for audio data and metadata, mostly used by [RAVE](http://github.com/acids-ircam/RAVE) and [AFTER](http://github.com/acids-ircam/AFTER) but opened for custom use. Built on [lmdb](https://openldap.org/), it leverages the pre-processing step of data parsing required by audio generative models to extract metadata and audio features that can be accessed and used during training. It brings :

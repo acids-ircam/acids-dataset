@@ -45,7 +45,7 @@ dependencies = [
     "einops",
     "rotary_embedding_torch",
     "audiomentations",
-    "acids-transforms @ git+https://github.com/acids-ircam/acids-transforms"
+    "acids-transforms"
 ]
 
 [project.scripts]

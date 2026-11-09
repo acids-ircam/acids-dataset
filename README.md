@@ -769,7 +769,7 @@ dataset = AudioDataset("path/to/stereo/audio", channels=2, chunk_length=131072, 
 
 Layouts are names of `acids_dataset.transforms.ambisonics.LAYOUTS` (`"mono"`, `"stereo"`, `"quad"`, `"5.0"`, `"7.0"`, `"octagon"`, `"tetrahedron"`, `"cube"`), or lists of directions.
 
-- `AmbisonicEncoder(order, layout)` encodes `(..., C, T)` into `(..., (N + 1)², T)` : each input channel is a source in the direction given by `layout`. With `layout=None`, the layout is chosen from the number of channels : mono, stereo, or `C` directions equally spaced on the horizontal plane. `order` is `"adaptive"` (default) : the order is inferred from the number of channels, as the lowest order whose encoding can be inverted for the layout (mono gives order 0, stereo and tetrahedra order 1, quad and 5.0 order 2, 7.0 order 3), such that decoding on the same layout gives the input channels back. A fixed order (an integer) raises a `ValueError` for inputs that cannot be encoded invertibly at this order (e.g. 7.0 signals at order 1).
+- `AmbisonicEncoder(order, layout)` encodes `(..., C, T)` into `(..., (N + 1)², T)` : each input channel is a source in the direction given by `layout`. With `layout=None`, the layout is chosen from the number of channels : mono, stereo, tetrahedron (4 channels, first order ambisonics : use `layout="quad"` for horizontal quad signals), or `C` directions equally spaced on the horizontal plane. `order` is `"adaptive"` (default) : the order is inferred from the number of channels, as the lowest order whose encoding can be inverted for the layout (mono gives order 0, stereo and tetrahedra order 1, quad and 5.0 order 2, 7.0 order 3), such that decoding on the same layout gives the input channels back. A fixed order (an integer) raises a `ValueError` for inputs that cannot be encoded invertibly at this order (e.g. 7.0 signals at order 1).
 - `AmbisonicDecoder(layout, order)` decodes `(..., K, T)` to the `L` loudspeakers of `layout`, `(..., L, T)`. With `order="adaptive"` (default), the order is inferred from the number of input channels (`K = (N + 1)²`, otherwise a `ValueError` is raised) ; a fixed order `N` raises a `ValueError` for inputs that do not have `(N + 1)²` channels. With `layout=None`, signals are decoded to `(N + 1)²` virtual loudspeakers spread regularly on the sphere. `method="mode_matching"` (default) inverts the encoding of the layout (pseudo-inverse), while `method="sampling"` projects signals on the harmonics of each loudspeaker (for regular layouts).
 
 ```python
@@ -789,6 +789,8 @@ decoder = encoder.inverse(5)                                  # AmbisonicDecoder
 assert torch.allclose(encoder.invert(encoder(x)), x, atol=1e-4)
 encoder = AmbisonicDecoder(layout="cube").inverse(1)          # AmbisonicEncoder(order=1, layout=<cube directions>, strict=False)
 ```
+
+With `layout=None`, `encoder.invert` infers the number of channels from signals ; ambisonic signals that are not encodings of default layouts (e.g. second-order recordings, with vertical components, that 5 horizontal channels cannot give) are decoded to `(N + 1)²` sources spread regularly on the sphere, as `AmbisonicDecoder(layout=None)` (exact inversion).
 
 Decoders often have more loudspeakers than ambisonic channels : `AmbisonicEncoder(strict=False)` then encodes channels that cannot be encoded invertibly at a fixed order (sources are mixed in ambisonic signals), instead of raising a `ValueError`.
 

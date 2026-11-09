@@ -203,7 +203,7 @@ def test_ambisonic_encoder_errors():
     with pytest.raises(ValueError):
         feature.invert(feature(signal(channels=2)), n_channels=7)           # 7 channels give order 3
     with pytest.raises(ValueError):
-        AmbisonicEncoder(order=1, sr=SR)(signal(channels=4))                # 4 horizontal channels need order 2
+        AmbisonicEncoder(order=1, sr=SR)(signal(channels=5))                # 5 horizontal channels need order 2
 
 
 @pytest.mark.parametrize("kwargs,order", [(dict(), 1), (dict(), 3), (dict(layout="cube", order=1), 1),
@@ -247,3 +247,26 @@ def test_invert_batches_and_devices(feature):
     y = feature(x)
     inverted = feature.invert(y, length=8192) if "length" in feature.invert.__code__.co_varnames else feature.invert(y)
     assert inverted.shape[:2] == (3, 1) and inverted.device == x.device
+
+
+@pytest.mark.parametrize("order", [2, 3])
+def test_ambisonic_encoder_inversion_of_recordings(order):
+    """ambisonic signals that are not encodings of default layouts (e.g. full-sphere recordings) are decoded to
+    (N + 1)^2 regularly spread sources, whose encoding gives the signals back."""
+    from acids_dataset.transforms.ambisonics import fibonacci_sphere
+    a = signal(channels=(order + 1) ** 2, length=4096)
+    feature = AmbisonicEncoder(sr=SR)
+    sources = feature.invert(a)
+    assert sources.shape == a.shape
+    directions = fibonacci_sphere((order + 1) ** 2).tolist()
+    assert torch.allclose(AmbisonicEncoder(order=order, layout=directions, sr=SR)(sources), a, atol=1e-3)
+
+
+def test_ambisonic_encoder_four_channels():
+    """4 channels are encoded on a tetrahedron (layout=None) : first order ambisonics, inverted exactly in both directions."""
+    x, foa = signal(channels=4, length=4096), signal(channels=4, length=4096, seed=1)
+    feature = AmbisonicEncoder(sr=SR)
+    assert feature(x).shape == foa.shape
+    assert torch.allclose(feature.invert(feature(x)), x, atol=1e-4)
+    assert torch.allclose(feature(feature.invert(foa)), foa, atol=1e-4)
+    assert AmbisonicEncoder(layout="quad", sr=SR)(x).shape[-2] == 9

@@ -80,13 +80,15 @@ def fibonacci_sphere(n: int) -> np.ndarray:
 
 def get_layout(layout, n_channels: int | None = None) -> np.ndarray:
     """directions (n, 2) in degrees of a layout : a name of LAYOUTS, a list of (azimuth, elevation), or None. With None,
-    the layout is chosen from n_channels : mono, stereo, or n_channels directions equally spaced on the horizontal plane
+    the layout is chosen from n_channels : mono, stereo, tetrahedron (4 channels, first order ambisonics), or n_channels
+    directions equally spaced on the horizontal plane
     (counterclockwise from the front)."""
     if layout is None:
         if n_channels is None:
             raise ValueError("layout=None needs a number of channels")
-        if n_channels in (1, 2):
-            return np.asarray(LAYOUTS[["mono", "stereo"][n_channels - 1]], dtype=np.float64)
+        defaults = {1: "mono", 2: "stereo", 4: "tetrahedron"}
+        if n_channels in defaults:
+            return np.asarray(LAYOUTS[defaults[n_channels]], dtype=np.float64)
         azimuth = (np.arange(n_channels) * 360. / n_channels + 180) % 360 - 180
         return np.stack([azimuth, np.zeros(n_channels)], axis=-1)
     if isinstance(layout, str):
@@ -129,7 +131,7 @@ def _select(x: torch.Tensor, candidates, matrix_fn, what: str):
 class AmbisonicEncoder(Transform):
     """Encodes multichannel signals into ambisonics : (..., C, T) -> (..., (N + 1)^2, T). Each input channel is a
     source in the direction given by layout (a name of LAYOUTS, a list of (azimuth, elevation) in degrees, or None : mono,
-    stereo, or C directions equally spaced on the horizontal plane), and ambisonic signals are the sum of sources
+    stereo, tetrahedron for 4 channels, or C directions equally spaced on the horizontal plane), and ambisonic signals are the sum of sources
     weighted by their spherical harmonics (ACN order, SN3D or N3D normalization).
 
     order is "adaptive" (default) : the order is inferred from the number of channels, as the lowest order whose
@@ -209,7 +211,10 @@ class AmbisonicEncoder(Transform):
 
     def invert(self, data, n_channels: int | None = None) -> torch.Tensor:
         """input channels (..., C, T) from ambisonic signals (..., (N + 1)^2, T), decoded with inverse(C). The number of
-        channels C is given by the layout, by n_channels if given, or inferred from signals (layout=None)."""
+        channels C is given by the layout, by n_channels if given, or inferred from signals (layout=None). With
+        layout=None, signals that are not encodings of default layouts (e.g. second-order recordings with vertical
+        components) are decoded to (N + 1)^2 sources spread regularly on the sphere (as AmbisonicDecoder(layout=None)) :
+        encoding them with these directions gives the signals back."""
         a = _as_tensor(data)
         order = ambisonic_order(a.shape[-2])
         if self.order != "adaptive" and order != self.order:
@@ -219,9 +224,15 @@ class AmbisonicEncoder(Transform):
                 n_channels = len(get_layout(self.layout))
             else:
                 candidates = [c for c in range(1, a.shape[-2] + 1) if self._order_or_none(c) == order]
-                if len(candidates) == 0:
-                    raise ValueError("no number of channels is encoded at order %d"%order)
-                n_channels = _select(a, candidates, self.encoding_matrix, "number of channels")
+                # the lowest number of channels whose encoding gives the signals
+                fitting = [c for c in candidates if _fits(a, self.encoding_matrix(c))]
+                if len(fitting) > 0:
+                    n_channels = fitting[0]
+                else:
+                    # signals are not encodings of default layouts (e.g. full-sphere recordings, with vertical
+                    # components) : decoded to (N + 1)^2 virtual sources spread regularly on the sphere (exact)
+                    return AmbisonicDecoder(layout=None, order=order, normalization=self.normalization,
+                                            method="mode_matching", sr=self.sr).apply(a)
         if ambisonic_channels(self.get_order(n_channels)) != a.shape[-2]:
             raise ValueError("encoding of %d channels gives %d ambisonic channels, got %d"%(
                 n_channels, ambisonic_channels(self.get_order(n_channels)), a.shape[-2]))

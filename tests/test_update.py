@@ -30,7 +30,7 @@ additional_args = {
 }
 
 # features defined on stereo signals only, computed on stereo datasets
-stereo_features = {"midside"}
+stereo_features = set()
 
 
 @pytest.mark.parametrize('config', ['rave.gin'])

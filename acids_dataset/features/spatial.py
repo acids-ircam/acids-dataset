@@ -1,4 +1,4 @@
-"""Spatial audio features : mid / side transform, stereo width (generalized to any number of channels), spatial
+"""Spatial audio features : stereo width (generalized to any number of channels), spatial
 covariance matrices and inter-channel descriptors."""
 import gin
 import numpy as np
@@ -9,51 +9,6 @@ from . import RAISE_EXC_IF_FEATURE_ERROR
 from .base import AcidsDatasetFeature
 
 from .framed import _EPS, _frames, _as_tensor, _FramedFeature, _WaveformFeature
-
-
-@gin.configurable(module="features")
-class MidSide(_WaveformFeature):
-    """Mid / side transform of stereo signals : (..., 2, T) -> (..., 2, T), mid first. Raises a ValueError if inputs do
-    not have 2 channels.
-
-    Normalizations :
-        - "average" (default) : M = (L + R) / 2, S = (L - R) / 2 ; the inverse is L = M + S, R = M - S.
-        - "orthonormal" : M = (L + R) / sqrt(2), S = (L - R) / sqrt(2). Energy preserving ; the transform is its own
-          inverse.
-    With inverse=True, inputs are mid / side signals, decoded into left / right signals (feature name : leftright).
-    invert gives inputs back exactly (decoding for mid / side signals, encoding with inverse=True). For a stereo width
-    descriptor, see Width.
-    """
-    normalizations = ["average", "orthonormal"]
-    invertible = True
-
-    def __init__(self, normalization: str = "average", inverse: bool = False, sr: int = 44100, **kwargs):
-        assert normalization in self.normalizations, "normalization must be in %s, got %s"%(self.normalizations, normalization)
-        self.normalization = normalization
-        self.inverse = inverse
-        super().__init__(sr=sr, **kwargs)
-
-    def __repr__(self):
-        return "MidSide(normalization=%s, inverse=%s)"%(self.normalization, self.inverse)
-
-    @property
-    def default_feature_name(self):
-        return "leftright" if self.inverse else "midside"
-
-    def __call__(self, data) -> torch.Tensor:
-        x = _as_tensor(data)
-        if x.shape[-2] != 2:
-            raise ValueError("MidSide needs stereo inputs (..., 2, T), got %d channel(s)"%x.shape[-2])
-        if self.normalization == "orthonormal":
-            scale = 2 ** -0.5
-        else:
-            scale = 1. if self.inverse else 0.5
-        a, b = x[..., 0, :], x[..., 1, :]
-        return torch.stack([a + b, a - b], dim=-2) * scale
-
-    def invert(self, features) -> torch.Tensor:
-        """left / right signals from mid / side signals (..., 2, T) (mid / side signals with inverse=True)."""
-        return MidSide(normalization=self.normalization, inverse=not self.inverse, sr=self.sr, device=self.device)(features)
 
 
 @gin.configurable(module="features")
@@ -518,4 +473,4 @@ class Pan(_FramedFeature):
         return torch.where(total > _EPS, (right - left) / total.clamp(min=_EPS), torch.zeros_like(total))
 
 
-__all__ = ['MidSide', 'Width', 'SpatialCovariance', 'CrossSpectralMatrix', 'SpectroSpatialCovarianceVector', 'InterChannelLevelDifference', 'InterChannelTimeDifference', 'InterChannelCoherence', 'GeneralizedCrossCorrelation', 'Pan']
+__all__ = ['Width', 'SpatialCovariance', 'CrossSpectralMatrix', 'SpectroSpatialCovarianceVector', 'InterChannelLevelDifference', 'InterChannelTimeDifference', 'InterChannelCoherence', 'GeneralizedCrossCorrelation', 'Pan']

@@ -10,9 +10,16 @@ import numpy as np
 import torch
 from scipy.special import lpmv
 
-from .framed import _as_tensor, _WaveformFeature
+from .base import Transform
 
 NORMALIZATIONS = ["sn3d", "n3d"]
+
+
+def _as_tensor(data) -> torch.Tensor:
+    if not torch.is_tensor(data):
+        data = torch.from_numpy(np.asarray(data))
+    data = data.float() if not data.is_floating_point() else data
+    return data[None] if data.ndim == 1 else data
 
 # loudspeaker layouts, as (azimuth, elevation) in degrees
 LAYOUTS = {
@@ -73,13 +80,15 @@ def fibonacci_sphere(n: int) -> np.ndarray:
 
 def get_layout(layout, n_channels: int | None = None) -> np.ndarray:
     """directions (n, 2) in degrees of a layout : a name of LAYOUTS, a list of (azimuth, elevation), or None. With None,
-    the layout is chosen from n_channels : mono, stereo, or n_channels directions equally spaced on the horizontal plane
+    the layout is chosen from n_channels : mono, stereo, tetrahedron (4 channels, first order ambisonics), or n_channels
+    directions equally spaced on the horizontal plane
     (counterclockwise from the front)."""
     if layout is None:
         if n_channels is None:
             raise ValueError("layout=None needs a number of channels")
-        if n_channels in (1, 2):
-            return np.asarray(LAYOUTS[["mono", "stereo"][n_channels - 1]], dtype=np.float64)
+        defaults = {1: "mono", 2: "stereo", 4: "tetrahedron"}
+        if n_channels in defaults:
+            return np.asarray(LAYOUTS[defaults[n_channels]], dtype=np.float64)
         azimuth = (np.arange(n_channels) * 360. / n_channels + 180) % 360 - 180
         return np.stack([azimuth, np.zeros(n_channels)], axis=-1)
     if isinstance(layout, str):
@@ -118,18 +127,18 @@ def _select(x: torch.Tensor, candidates, matrix_fn, what: str):
     raise ValueError("%s cannot be inferred from signals (candidates : %s)"%(what, candidates))
 
 
-@gin.configurable(module="features")
-class AmbisonicEncoder(_WaveformFeature):
+@gin.configurable(module="transforms")
+class AmbisonicEncoder(Transform):
     """Encodes multichannel signals into ambisonics : (..., C, T) -> (..., (N + 1)^2, T). Each input channel is a
     source in the direction given by layout (a name of LAYOUTS, a list of (azimuth, elevation) in degrees, or None : mono,
-    stereo, or C directions equally spaced on the horizontal plane), and ambisonic signals are the sum of sources
+    stereo, tetrahedron for 4 channels, or C directions equally spaced on the horizontal plane), and ambisonic signals are the sum of sources
     weighted by their spherical harmonics (ACN order, SN3D or N3D normalization).
 
     order is "adaptive" (default) : the order is inferred from the number of channels, as the lowest order whose
     encoding is invertible for the layout (the C sources give C independent ambisonic components). For instance, mono
     gives order 0, stereo and tetrahedra order 1, 5.0 and quad order 2, 7.0 order 3 (horizontal layouts of C channels
     need order ceil((C - 1) / 2)). With adaptive orders and default layouts, signals with different numbers of channels
-    can be encoded by the same feature. With a fixed order N (an integer), inputs whose channels cannot be encoded
+    can be encoded by the same transform. With a fixed order N (an integer), inputs whose channels cannot be encoded
     invertibly at order N (e.g. 7.0 signals at order 1) raise a ValueError.
 
     With strict=False, fixed orders also encode channels that cannot be encoded invertibly (e.g. loudspeaker signals,
@@ -143,20 +152,18 @@ class AmbisonicEncoder(_WaveformFeature):
     the lowest one whose encoding gives the signals (or n_channels, if given).
     """
     invertible = True
+    allow_random = False
+    takes_as_input = Transform.input_types.torch
 
     def __init__(self, order: int | str = "adaptive", layout: str | list | None = None, normalization: str = "sn3d",
-                 strict: bool = True, sr: int = 44100, **kwargs):
+                 strict: bool = True, sr: int | None = None, name: str | None = None, **kwargs):
         _check_order(order)
         assert normalization in NORMALIZATIONS, "normalization must be in %s, got %s"%(NORMALIZATIONS, normalization)
+        super().__init__(sr=sr, name=name or "ambisonics", **kwargs)
         self.order, self.layout, self.normalization, self.strict = order, layout, normalization, strict
-        super().__init__(sr=sr, **kwargs)
 
     def __repr__(self):
         return "AmbisonicEncoder(order=%s, layout=%s, normalization=%s)"%(self.order, self.layout, self.normalization)
-
-    @property
-    def default_feature_name(self):
-        return "ambisonics"
 
     def _directions(self, n_channels: int) -> np.ndarray:
         directions = get_layout(self.layout, n_channels)
@@ -185,7 +192,7 @@ class AmbisonicEncoder(_WaveformFeature):
         """encoding matrix ((N + 1)^2, C) for inputs with n_channels channels."""
         return self._harmonics(self.get_order(n_channels), n_channels).T
 
-    def __call__(self, data) -> torch.Tensor:
+    def apply(self, data) -> torch.Tensor:
         x = _as_tensor(data)
         matrix = torch.as_tensor(self.encoding_matrix(x.shape[-2]), dtype=x.dtype, device=x.device)
         return matrix @ x
@@ -200,12 +207,15 @@ class AmbisonicEncoder(_WaveformFeature):
         """decoder inverting the encoding of n_channels channels : AmbisonicDecoder (mode matching) at the order of the
         encoding, whose loudspeakers are the directions of the input channels."""
         return AmbisonicDecoder(layout=self._directions(n_channels).tolist(), order=self.get_order(n_channels),
-                                normalization=self.normalization, method="mode_matching", sr=self.sr, device=self.device)
+                                normalization=self.normalization, method="mode_matching", sr=self.sr)
 
-    def invert(self, features, n_channels: int | None = None) -> torch.Tensor:
+    def invert(self, data, n_channels: int | None = None) -> torch.Tensor:
         """input channels (..., C, T) from ambisonic signals (..., (N + 1)^2, T), decoded with inverse(C). The number of
-        channels C is given by the layout, by n_channels if given, or inferred from signals (layout=None)."""
-        a = _as_tensor(features)
+        channels C is given by the layout, by n_channels if given, or inferred from signals (layout=None). With
+        layout=None, signals that are not encodings of default layouts (e.g. second-order recordings with vertical
+        components) are decoded to (N + 1)^2 sources spread regularly on the sphere (as AmbisonicDecoder(layout=None)) :
+        encoding them with these directions gives the signals back."""
+        a = _as_tensor(data)
         order = ambisonic_order(a.shape[-2])
         if self.order != "adaptive" and order != self.order:
             raise ValueError("order %d needs %d ambisonic channels, got %d"%(self.order, ambisonic_channels(self.order), a.shape[-2]))
@@ -214,17 +224,23 @@ class AmbisonicEncoder(_WaveformFeature):
                 n_channels = len(get_layout(self.layout))
             else:
                 candidates = [c for c in range(1, a.shape[-2] + 1) if self._order_or_none(c) == order]
-                if len(candidates) == 0:
-                    raise ValueError("no number of channels is encoded at order %d"%order)
-                n_channels = _select(a, candidates, self.encoding_matrix, "number of channels")
+                # the lowest number of channels whose encoding gives the signals
+                fitting = [c for c in candidates if _fits(a, self.encoding_matrix(c))]
+                if len(fitting) > 0:
+                    n_channels = fitting[0]
+                else:
+                    # signals are not encodings of default layouts (e.g. full-sphere recordings, with vertical
+                    # components) : decoded to (N + 1)^2 virtual sources spread regularly on the sphere (exact)
+                    return AmbisonicDecoder(layout=None, order=order, normalization=self.normalization,
+                                            method="mode_matching", sr=self.sr).apply(a)
         if ambisonic_channels(self.get_order(n_channels)) != a.shape[-2]:
             raise ValueError("encoding of %d channels gives %d ambisonic channels, got %d"%(
                 n_channels, ambisonic_channels(self.get_order(n_channels)), a.shape[-2]))
-        return self.inverse(n_channels)(a)
+        return self.inverse(n_channels).apply(a)
 
 
-@gin.configurable(module="features")
-class AmbisonicDecoder(_WaveformFeature):
+@gin.configurable(module="transforms")
+class AmbisonicDecoder(Transform):
     """Decodes ambisonic signals (..., K, T), in ACN order and SN3D or N3D normalization, to the loudspeakers of layout :
     (..., L, T).
 
@@ -250,21 +266,19 @@ class AmbisonicDecoder(_WaveformFeature):
     """
     methods = ["mode_matching", "sampling"]
     invertible = True
+    allow_random = False
+    takes_as_input = Transform.input_types.torch
 
     def __init__(self, layout: str | list | None = None, order: int | str = "adaptive", normalization: str = "sn3d",
-                 method: str = "mode_matching", sr: int = 44100, **kwargs):
+                 method: str = "mode_matching", sr: int | None = None, name: str | None = None, **kwargs):
         _check_order(order)
         assert normalization in NORMALIZATIONS, "normalization must be in %s, got %s"%(NORMALIZATIONS, normalization)
         assert method in self.methods, "method must be in %s, got %s"%(self.methods, method)
+        super().__init__(sr=sr, name=name or "ambisonics_decoded", **kwargs)
         self.layout, self.order, self.normalization, self.method = layout, order, normalization, method
-        super().__init__(sr=sr, **kwargs)
 
     def __repr__(self):
         return "AmbisonicDecoder(layout=%s, order=%s, normalization=%s, method=%s)"%(self.layout, self.order, self.normalization, self.method)
-
-    @property
-    def default_feature_name(self):
-        return "ambisonics_decoded"
 
     def get_order(self, n_channels: int) -> int:
         """ambisonic order of inputs with n_channels channels : inferred with adaptive orders, and checked with fixed
@@ -287,7 +301,7 @@ class AmbisonicDecoder(_WaveformFeature):
         loudspeakers (strict=False, as layouts may have more loudspeakers than ambisonic channels). Sampling decoders
         are only inverted by this encoder on regular layouts."""
         return AmbisonicEncoder(order=order, layout=self.directions(order).tolist(), normalization=self.normalization,
-                                strict=False, sr=self.sr, device=self.device)
+                                strict=False, sr=self.sr)
 
     def decoding_matrix(self, order: int) -> np.ndarray:
         """decoding matrix (L, (order + 1)^2)."""
@@ -301,17 +315,17 @@ class AmbisonicDecoder(_WaveformFeature):
         n3d = harmonics * to_n3d
         return n3d * to_n3d / len(directions)
 
-    def __call__(self, data) -> torch.Tensor:
+    def apply(self, data) -> torch.Tensor:
         x = _as_tensor(data)
         order = self.get_order(x.shape[-2])
         matrix = torch.as_tensor(self.decoding_matrix(order), dtype=x.dtype, device=x.device)
         return matrix @ x
 
-    def invert(self, features, order: int | None = None) -> torch.Tensor:
+    def invert(self, data, order: int | None = None) -> torch.Tensor:
         """ambisonic signals (..., (N + 1)^2, T) from loudspeaker signals (..., L, T). The order is the fixed order of
-        the feature, order if given, or is inferred from the number of loudspeakers (and from signals, for layouts that
+        the transform, order if given, or is inferred from the number of loudspeakers (and from signals, for layouts that
         can hold several orders)."""
-        s = _as_tensor(features)
+        s = _as_tensor(data)
         n_speakers = s.shape[-2]
         if order is None:
             if self.order != "adaptive":
@@ -327,7 +341,7 @@ class AmbisonicDecoder(_WaveformFeature):
             raise ValueError("decoding at order %d gives %d loudspeakers, got %d channels"%(order, len(self.directions(order)), n_speakers))
         if self.method == "mode_matching":
             # the encoding matrix of loudspeaker directions is the pseudo-inverse of the decoding matrix
-            return self.inverse(order)(s)
+            return self.inverse(order).apply(s)
         return torch.as_tensor(np.linalg.pinv(self.decoding_matrix(order)), dtype=s.dtype, device=s.device) @ s
 
 

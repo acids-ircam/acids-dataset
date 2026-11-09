@@ -68,14 +68,7 @@
 ::: acids_dataset.features.spatial
     options:
       show_root_heading: false
-      members: [MidSide, Width, SpatialCovariance, CrossSpectralMatrix, SpectroSpatialCovarianceVector, InterChannelLevelDifference, InterChannelTimeDifference, InterChannelCoherence, GeneralizedCrossCorrelation, Pan]
-
-## Ambisonics
-
-::: acids_dataset.features.ambisonics
-    options:
-      show_root_heading: false
-      members: [AmbisonicEncoder, AmbisonicDecoder, spherical_harmonics, get_layout, LAYOUTS]
+      members: [Width, SpatialCovariance, CrossSpectralMatrix, SpectroSpatialCovarianceVector, InterChannelLevelDifference, InterChannelTimeDifference, InterChannelCoherence, GeneralizedCrossCorrelation, Pan]
 
 ## Quality descriptors
 

@@ -59,6 +59,7 @@ nav:
       - reference/index.md
       - Datasets: reference/datasets.md
       - Features: reference/features.md
+      - Transforms: reference/transforms.md
       - Sampling: reference/sampling.md
       - Pre-processing and presets: reference/preprocessing.md
       - Health and browser: reference/health.md

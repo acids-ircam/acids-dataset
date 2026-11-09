@@ -3,8 +3,8 @@ import math
 import numpy as np
 import pytest
 import torch
-from acids_dataset.features import AmbisonicEncoder, AmbisonicDecoder
-from acids_dataset.features.ambisonics import spherical_harmonics, fibonacci_sphere, get_layout, LAYOUTS
+from acids_dataset.transforms import AmbisonicEncoder, AmbisonicDecoder
+from acids_dataset.transforms.ambisonics import spherical_harmonics, fibonacci_sphere, get_layout, LAYOUTS
 
 
 def test_spherical_harmonics_sn3d():
@@ -23,7 +23,7 @@ def test_spherical_harmonics_n3d_orthonormal():
     assert np.allclose(y.T @ y / len(directions), np.eye(16), atol=2e-3)
 
 
-@pytest.mark.parametrize("n_channels, order", [(1, 0), (2, 1), (3, 1), (4, 2), (5, 2), (7, 3)])
+@pytest.mark.parametrize("n_channels, order", [(1, 0), (2, 1), (3, 1), (4, 1), (5, 2), (7, 3)])
 def test_adaptive_order(n_channels, order):
     encoder = AmbisonicEncoder()
     assert encoder.get_order(n_channels) == order

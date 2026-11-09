@@ -132,11 +132,24 @@ class Exp1m(Transform):
 
 @gin.configurable(module="transforms")
 class Crop(Transform):
+    """Randomly crops signals to n_signal samples along dim. Signals shorter than n_signal are padded to n_signal
+    first (and then returned whole).
+
+    Args:
+        n_signal (int): size of crops. If None, signals are returned unchanged.
+        dim (int): cropped dimension. Defaults to -1.
+        pad_if_shorter (str | None): pad mode of signals shorter than n_signal : "zero" (default), "repeat",
+            "replicate" or "reflect" (see utils.PadMode). If None, shorter signals raise a ValueError.
+        pad_dir (str): where padding is added : "right" (default), "left" or "center".
     """
-    Randomly crops signal to fit n_signal samples
-    """
-    def __init__(self, n_signal: int | None = None, dim=-1, pad_if_shorter=None, pad_dir="right", **kwargs):
+    takes_as_input = Transform.input_types.torch
+    pad_dirs = ["right", "left", "center"]
+
+    def __init__(self, n_signal: int | None = None, dim: int = -1, pad_if_shorter: str | None = "zero", pad_dir: str = "right", **kwargs):
         super().__init__(**kwargs)
+        assert pad_dir in self.pad_dirs, "pad_dir must be in %s, got %s"%(self.pad_dirs, pad_dir)
+        if pad_if_shorter is not None and (isinstance(pad_if_shorter, str) and pad_if_shorter.upper() == "DISCARD"):
+            raise ValueError("pad_if_shorter cannot be discard ; use None to raise errors on shorter signals")
         self.n_signal = n_signal
         self.pad_if_shorter = pad_if_shorter
         self.dim = dim
@@ -148,22 +161,28 @@ class Crop(Transform):
         else:
             return x
 
+    def _pad_right(self, x, n):
+        return pad(x, x.shape[-1] + n, self.pad_if_shorter) if n > 0 else x
+
+    def _pad_left(self, x, n):
+        return self._pad_right(x.flip(-1), n).flip(-1) if n > 0 else x
+
     def _pad(self, x):
-        missing_points = self.n_signal - x.shape[self.dim]
-        if self.pad_dir == "right": 
-            pad_dim = (0, missing_points)
-        elif self.pad_dir == "left": 
-            pad_dim = (missing_points, 0)
+        missing = self.n_signal - x.shape[self.dim]
+        x = x.movedim(self.dim, -1)
+        if self.pad_dir == "right":
+            x = self._pad_right(x, missing)
+        elif self.pad_dir == "left":
+            x = self._pad_left(x, missing)
         else:
-            pad_dim = (math.floor(missing_points)/2, math.ceil(missing_points)/2)
-        return torch.nn.functional.pad(x, pad_dim, mode=self.pad_if_shorter)
+            x = self._pad_left(self._pad_right(x, missing - missing // 2), missing // 2)
+        return x.movedim(-1, self.dim)
 
     def apply(self, x):
-        if x.shape[self.dim] < self.n_signal: 
+        if x.shape[self.dim] < self.n_signal:
             if self.pad_if_shorter is None:
                 raise ValueError("cannot crop %s samples on dim %d: got %d"%(self.n_signal, self.dim,  x.shape[self.dim]))
-            else:
-                x = self._pad(x)
+            return self._pad(x)
         in_point = random.randint(0, x.shape[self.dim] - self.n_signal)
         idx = [slice(None)] * len(x.shape); idx[self.dim] = slice(in_point, in_point + self.n_signal)
         return x.__getitem__(tuple(idx))

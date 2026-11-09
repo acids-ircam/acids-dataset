@@ -62,6 +62,46 @@ atf.NormRange(max_value=0.9, boost=False)                                  # onl
 - Gains are the same for every channel (the stereo image is kept). As they are interpolated between frames, loudness only reaches the target range on steady parts (frames next to abrupt changes may differ by 1-2 dB). With `limit=True` (default), outputs whose peak exceeds 1 are scaled down to a peak of 1.
 - `NormRange` measures the peak over channels, for each item of a batch : louder inputs are divided, and quieter ones multiplied (unless `boost=False`). Silent inputs are unchanged.
 
+## Spatial transforms
+
+`MidSide`, `AmbisonicEncoder` and `AmbisonicDecoder` (`acids_dataset.transforms`) change the channels of multichannel signals, `(..., C, T)` : they are deterministic (`p` is ignored), and can be used as dataset transforms, in `sample_features`, or called on tensors and arrays. They are invertible (`invertible = True`) : `invert` gives inputs back, as for [invertible features](features.md#inverting-features). Their default names are `midside` (`leftright` with `inverse=True`), `ambisonics` and `ambisonics_decoded`.
+
+```python
+from acids_dataset import transforms as atf
+dataset = AudioDataset("path/to/stereo/audio", channels=2, chunk_length=131072, transforms=atf.MidSide())   # mid / side waveforms
+```
+
+`MidSide` is the mid / side transform of stereo signals : `(..., 2, T)` gives `(..., 2, T)`, mid first, with M = (L + R) / 2 and S = (L - R) / 2 (`normalization="average"`, default), or M = (L + R) / √2 and S = (L - R) / √2 (`normalization="orthonormal"`, energy preserving). `inverse=True` decodes mid / side signals into left / right signals (default name : `leftright`), and `invert` gives inputs back. Inputs that do not have 2 channels raise a `ValueError`.
+
+### Ambisonics
+
+`AmbisonicEncoder` and `AmbisonicDecoder` convert multichannel signals to and from ambisonics. Ambisonic signals follow the AmbiX convention : ACN channel ordering, real spherical harmonics without Condon-Shortley phase, and SN3D normalization (`normalization="n3d"` is also available). Directions are given as `(azimuth, elevation)` in degrees, azimuth counterclockwise from the front (90 : left) and elevation upwards.
+
+Layouts are names of `acids_dataset.transforms.ambisonics.LAYOUTS` (`"mono"`, `"stereo"`, `"quad"`, `"5.0"`, `"7.0"`, `"octagon"`, `"tetrahedron"`, `"cube"`), or lists of directions.
+
+- `AmbisonicEncoder(order, layout)` encodes `(..., C, T)` into `(..., (N + 1)², T)` : each input channel is a source in the direction given by `layout`. With `layout=None`, the layout is chosen from the number of channels : mono, stereo, or `C` directions equally spaced on the horizontal plane. `order` is `"adaptive"` (default) : the order is inferred from the number of channels, as the lowest order whose encoding can be inverted for the layout (mono gives order 0, stereo and tetrahedra order 1, quad and 5.0 order 2, 7.0 order 3), such that decoding on the same layout gives the input channels back. A fixed order (an integer) raises a `ValueError` for inputs that cannot be encoded invertibly at this order (e.g. 7.0 signals at order 1).
+- `AmbisonicDecoder(layout, order)` decodes `(..., K, T)` to the `L` loudspeakers of `layout`, `(..., L, T)`. With `order="adaptive"` (default), the order is inferred from the number of input channels (`K = (N + 1)²`, otherwise a `ValueError` is raised) ; a fixed order `N` raises a `ValueError` for inputs that do not have `(N + 1)²` channels. With `layout=None`, signals are decoded to `(N + 1)²` virtual loudspeakers spread regularly on the sphere. `method="mode_matching"` (default) inverts the encoding of the layout (pseudo-inverse), while `method="sampling"` projects signals on the harmonics of each loudspeaker (for regular layouts).
+
+```python
+from acids_dataset.transforms import AmbisonicEncoder, AmbisonicDecoder
+encoder = AmbisonicEncoder(layout="5.0")                  # 5 channels -> second order ambisonics (9 channels)
+decoder = AmbisonicDecoder(layout="5.0")
+dataset = AudioDataset("path/to/5.0/audio", channels=5, chunk_length=2., transforms=encoder)   # ambisonic waveforms
+x = torch.randn(5, 44100)
+assert torch.allclose(decoder(encoder(x)), x, atol=1e-4)  # exact reconstruction
+```
+
+The spherical harmonics of any directions are given by `acids_dataset.transforms.ambisonics.spherical_harmonics(order, azimuth, elevation)`, as an array `(n_directions, (order + 1)²)`. Encoders and decoders can also be inverted (as invertible features, see [Inverting features](features.md#inverting-features)) : they are each other's inverse. `encoder.inverse(n_channels)` gives the `AmbisonicDecoder` (mode matching) whose loudspeakers are the directions of the input channels, and `decoder.inverse(order)` the `AmbisonicEncoder` whose sources are the loudspeakers ; `invert` uses them.
+
+```python
+encoder = AmbisonicEncoder(layout="5.0")
+decoder = encoder.inverse(5)                                  # AmbisonicDecoder(layout=<5.0 directions>, order=2, method="mode_matching")
+assert torch.allclose(encoder.invert(encoder(x)), x, atol=1e-4)
+encoder = AmbisonicDecoder(layout="cube").inverse(1)          # AmbisonicEncoder(order=1, layout=<cube directions>, strict=False)
+```
+
+Decoders often have more loudspeakers than ambisonic channels : `AmbisonicEncoder(strict=False)` then encodes channels that cannot be encoded invertibly at a fixed order (sources are mixed in ambisonic signals), instead of raising a `ValueError`.
+
 For a full table of available transfroms, see at the [end](#full-augmentation-table) of `README.md`. 
 
 ## Full augmentation table
@@ -74,6 +114,8 @@ For a full table of available transfroms, see at the [end](#full-augmentation-ta
 | AddShortNoises        | `addshortnoises.gin`        | Add short bursts of noise to the signal                                     |
 | AirAbsorption         | `airabsorption.gin`         | Add air absorption.                                                         |
 | Aliasing              | `aliasing.gin`              | Aliases audio signal.                                                       |
+| AmbisonicDecoder      | `ambisonicdecoder.gin`      | Decodes ambisonic signals to a loudspeaker layout.                          |
+| AmbisonicEncoder      | `ambisonicencoder.gin`      | Encodes multichannel signals into ambisonics.                               |
 | ApplyImpulseResponse  | `applyimpulseresponse.gin`  | Applies impulse response (needs audio files as first argument).             |
 | BandPassFilter        | `bandpassfilter.gin`        | Random band-pass filter.                                                    |
 | BasicPitch            | `basicpitch.gin`            | Pitch extraction based on BasicPitch                                        |
@@ -82,7 +124,7 @@ For a full table of available transfroms, see at the [end](#full-augmentation-ta
 | ClippingDistortion    | `clippingdistortion.gin`    | Adds clipping distortion.                                                   |
 | Compress              | `compress.gin`              | Compression with random parameters.                                         |
 | CompressRange         | `compressrange.gin`         | Compresses the loudness range of the signal to a target range (LUFS).       |
-| Crop                  | `crop.gin`                  | Random cropping to fixed chunk size.                                        |
+| Crop                  | `crop.gin`                  | Random cropping to fixed chunk size (shorter signals are padded).           |
 | Dequantize            | `dequantize.gin`            | Dequantize incoming signal.                                                 |
 | Derivator             | `derivator.gin`             | Derivates incoming signal.                                                  |
 | FrequencyMasking      | `frequencymasking.gin`      | Randomly masks frequency bands of input.                                    |
@@ -95,6 +137,7 @@ For a full table of available transfroms, see at the [end](#full-augmentation-ta
 | LoudnessNormalization | `loudnessnormalization.gin` | Normalizes loundess according to IFRS standard.                             |
 | LowPassFilter         | `lowpassfilter.gin`         | Applies random low-pass filtering.                                          |
 | LowShelfFilter        | `lowshelffilter.gin`        | Applies random low-shelf filtering.                                         |
+| MidSide               | `midside.gin`               | Mid / side transform of stereo signals (and its inverse).                   |
 | Mp3Compression        | `mp3compression.gin`        | Applies random mp3 compression.                                             |
 | Mute                  | `mute.gin`                  | Mutes incoming incoming signal.                                             |
 | Normalize             | `normalize.gin`             | Normalizes incoming signal.                                                 |

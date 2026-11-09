@@ -84,15 +84,12 @@ All features are in `acids_dataset.features`. The name is the default key in out
 | harmonic | `Chroma` | `chroma` | `(12, n_frames)` |
 | | `Harmonicity`, `Inharmonicity` | `harmonicity`, `inharmonicity` | per frame |
 | spatial | `Pan` | `pan` | per frame, [-1, 1] |
-| | `MidSide` | `midside` | `(2, T)` mid / side signals of stereo inputs (or left / right with `inverse=True`) |
 | | `Width` | `width` | per frame (width, ratio or energies) |
 | | `InterChannelLevelDifference`, `InterChannelTimeDifference`, `InterChannelCoherence` | `ild`, `itd`, `coherence` | `(C - 1, n_frames)` |
 | | `GeneralizedCrossCorrelation` | `gcc` | `(P, n_frames)` delays, or `(P, n_lags, n_frames)` |
 | | `SpatialCovariance` | `spatial_covariance` | `(C, C, n_frames)` |
 | | `CrossSpectralMatrix` | `csm` | `(2, K, C, C, n_frames)` |
 | | `SpectroSpatialCovarianceVector` | `sscv` | `(C^2, n_bands, n_frames)` |
-| ambisonics | `AmbisonicEncoder` | `ambisonics` | `((N + 1)^2, T)` ambisonic signals (fixed or adaptive order) |
-| | `AmbisonicDecoder` | `ambisonics_decoded` | `(L, T)` loudspeaker signals |
 | quality | `ClippingRatio`, `DCOffset`, `DynamicRange`, `SilenceRatio` | `clipping_ratio`, `dc_offset`, ... | per chunk |
 | symbolic | `AfterMIDI` | `midi` | MIDI notes of the chunk, from MIDI files found next to audio files, or transcribed with BasicPitch |
 | models | `ModuleEmbedding` | `embedding` | output of a PyTorch / TorchScript model |

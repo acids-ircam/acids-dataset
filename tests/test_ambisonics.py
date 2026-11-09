@@ -3,8 +3,8 @@ import math
 import numpy as np
 import pytest
 import torch
-from acids_dataset.features import AmbisonicEncoder, AmbisonicDecoder
-from acids_dataset.features.ambisonics import spherical_harmonics, fibonacci_sphere, get_layout, LAYOUTS
+from acids_dataset.transforms import AmbisonicEncoder, AmbisonicDecoder
+from acids_dataset.transforms.ambisonics import spherical_harmonics, fibonacci_sphere, get_layout, LAYOUTS
 
 
 def test_spherical_harmonics_sn3d():

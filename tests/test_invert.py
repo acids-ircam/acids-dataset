@@ -3,8 +3,8 @@ import math
 import pytest
 import torch
 
-from acids_dataset.features import (AcidsDatasetFeature, STFT, DGT, FFT, DCT, PQMF, MidSide, AmbisonicEncoder,
-                                    AmbisonicDecoder, Loudness, Width, Mel)
+from acids_dataset.features import AcidsDatasetFeature, STFT, DGT, FFT, DCT, PQMF, Loudness, Width, Mel
+from acids_dataset.transforms import MidSide, AmbisonicEncoder, AmbisonicDecoder
 
 SR = 22050
 
@@ -18,6 +18,7 @@ def snr(estimate, target):
 
 
 def test_invertible_flags():
+    # spatial transforms (MidSide, AmbisonicEncoder, AmbisonicDecoder) are also invertible
     for feature in [STFT(sr=SR), DGT(sr=SR), FFT(sr=SR), DCT(sr=SR), PQMF(n_bands=4, sr=SR), MidSide(sr=SR),
                     AmbisonicEncoder(sr=SR), AmbisonicDecoder(sr=SR)]:
         assert feature.invertible, feature

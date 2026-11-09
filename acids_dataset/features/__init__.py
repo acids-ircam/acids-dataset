@@ -11,7 +11,7 @@ from .midi import AfterMIDI
 from .module import *
 from .beat_tracking import BeatTrack
 from .pitch import Pitch, F0
-from .spatial import MidSide, Width, SpatialCovariance, CrossSpectralMatrix, SpectroSpatialCovarianceVector, InterChannelLevelDifference, InterChannelTimeDifference, InterChannelCoherence, GeneralizedCrossCorrelation, Pan
+from .spatial import Width, SpatialCovariance, CrossSpectralMatrix, SpectroSpatialCovarianceVector, InterChannelLevelDifference, InterChannelTimeDifference, InterChannelCoherence, GeneralizedCrossCorrelation, Pan
 from .spectral import *
 from .temporal import *
 from .onsets import *
@@ -20,7 +20,6 @@ from .quality import *
 from .representations import STFT, DGT, FFT, DCT, Gammatone, Cepstrum
 from .pqmf import PQMF
 from .lpc import LPC
-from .ambisonics import AmbisonicEncoder, AmbisonicDecoder
 
 # advanced operations
 from .clustering import hash_from_clustering

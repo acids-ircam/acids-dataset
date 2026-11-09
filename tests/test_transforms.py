@@ -21,14 +21,18 @@ additional_args = {
     "RoomSimulator": []
 }
 
+# transforms defined on multichannel signals only
+input_channels = {"MidSide": 2}
+
 @pytest.mark.parametrize("transform", get_subclasses_from_package(transforms, transforms.Transform))
 @pytest.mark.parametrize("sr", [44100])
 @pytest.mark.parametrize("in_type", ["torch", "numpy"])
 def test_transform(transform: transforms.Transform, sr: int, in_type: str, t: float = 10.0):
+    channels = input_channels.get(transform.__name__, 1)
     if in_type == "torch":
-        x = torch.randn(4, 1, int(t * sr))
+        x = torch.randn(4, channels, int(t * sr))
     elif in_type == "numpy":
-        x = np.random.random(size=(4, 1, int(t * sr)))
+        x = np.random.random(size=(4, channels, int(t * sr)))
     # test forward
     args = additional_args.get(transform.__name__, tuple())
     t = transform(*args, sr=sr)
@@ -74,6 +78,7 @@ def test_transform_with_audio(transform, sr, t=2.0, n_samples=8):
         outs = []
         for _ in range(n_samples):
             x = v(t, sr)
+            x = x.expand(input_channels.get(transform.__name__, 1), -1).clone() if torch.is_tensor(x) else x
             tr = transform(*args, sr=sr)
             out = tr(x)
             if tr.type_hash(out) not in [tr.input_types.torch, tr.input_types.numpy]:

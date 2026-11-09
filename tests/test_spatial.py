@@ -2,7 +2,8 @@
 import pytest
 import torch
 import numpy as np, scipy.signal
-from acids_dataset.features import MidSide, Width, SpatialCovariance, CrossSpectralMatrix, SpectroSpatialCovarianceVector, GeneralizedCrossCorrelation
+from acids_dataset.transforms import MidSide
+from acids_dataset.features import Width, SpatialCovariance, CrossSpectralMatrix, SpectroSpatialCovarianceVector, GeneralizedCrossCorrelation
 
 N = 22050
 
@@ -57,7 +58,9 @@ def test_midside_transform(signals):
     # side of identical channels is zero ; batches
     assert torch.all(MidSide()(signals["identical"])[1] == 0)
     assert MidSide()(torch.randn(3, 2, 100)).shape == (3, 2, 100)
-    assert MidSide().feature_name == "midside" and MidSide(inverse=True).feature_name == "leftright"
+    assert MidSide().name == "midside" and MidSide(inverse=True).name == "leftright"
+    # numpy inputs give numpy outputs
+    assert isinstance(MidSide()(np.random.randn(2, 100)), np.ndarray)
 
 
 @pytest.mark.parametrize("name", ["mono", "quad"])

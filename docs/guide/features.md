@@ -54,14 +54,12 @@ Each descriptor is a feature (computed in pre-processing or online, and in [batc
 | harmonic | `Chroma` | `(12, n_frames)` | energy of pitch classes (0 : C ... 11 : B) |
 | | `Harmonicity` | per frame, [0, 1] | periodicity (normalized autocorrelation) |
 | | `Inharmonicity` | per frame | mean relative deviation of partials from a harmonic series |
-| spatial | `MidSide` | `(2, T)` | mid / side transform of stereo signals (and its inverse) |
-| | `Width`, `SpatialCovariance`, `CrossSpectralMatrix`, `SpectroSpatialCovarianceVector` | see [Spatial features](#spatial-features) | stereo width, inter-channel covariances, cross spectral matrices, SSCV |
+| spatial | `Width`, `SpatialCovariance`, `CrossSpectralMatrix`, `SpectroSpatialCovarianceVector` | see [Spatial features](#spatial-features) | stereo width, inter-channel covariances, cross spectral matrices, SSCV |
 | | `InterChannelLevelDifference` | `(C - 1, n_frames)`, dB | level of each channel relative to the first one (per band with `n_bands`) |
 | | `InterChannelTimeDifference` | `(C - 1, n_frames)`, samples or seconds | delay of each channel relative to the first one |
 | | `InterChannelCoherence` | `(C - 1, n_frames)`, [0, 1] | maximum cross-correlation with the first channel |
 | | `GeneralizedCrossCorrelation` | `(P, n_frames)`, samples or seconds (or `(P, n_lags, n_frames)`) | GCC-PHAT (and other weightings) delays between pairs of channels |
 | | `Pan` | per frame, [-1, 1] | stereo position from the energies of the first two channels |
-| | `AmbisonicEncoder`, `AmbisonicDecoder` | `((N + 1)², T)`, `(L, T)` | ambisonic encoding and decoding, see [Ambisonics](#ambisonics) |
 | quality | `Peak` | per chunk (per channel), linear (or dBFS) | maximum absolute amplitude |
 | | `LoudnessMeter` | per chunk, `(n_values,)`, dB / dB(A) / LUFS | statistics of frame levels, see [Loudness](#loudness) |
 | | `ClippingRatio` | per chunk | ratio of clipped samples |
@@ -110,7 +108,7 @@ meter.output_names    # ["min_db", "max_db", "lufs_q0", "lufs_q0.25", "lufs_q0.5
 
 ## Spatial features
 
-`MidSide` is the mid / side transform of stereo signals : `(..., 2, T)` gives `(..., 2, T)`, mid first, with M = (L + R) / 2 and S = (L - R) / 2 (`normalization="average"`, default), or M = (L + R) / √2 and S = (L - R) / √2 (`normalization="orthonormal"`, energy preserving). `inverse=True` decodes mid / side signals into left / right signals (feature name : `leftright`), and `invert` gives inputs back. Inputs that do not have 2 channels raise a `ValueError`.
+The mid / side transform and ambisonic encoding and decoding, that give signals instead of descriptors, are transforms : see [Spatial transforms](augmentations.md#spatial-transforms).
 
 `Width`, `SpatialCovariance`, `CrossSpectralMatrix`, `SpectroSpatialCovarianceVector` and `GeneralizedCrossCorrelation` describe multichannel audio, per frame (`frame_length`, `hop_length`) :
 - `Width` measures the stereo width from a mid / side analysis (mid = mean of channels, side = residual of each channel, i.e. (L + R) / 2 and ±(L - R) / 2 in stereo, generalized to any number of channels). `mode="width"` (default) gives side / (mid + side) energy in [0, 1] (0 for identical channels, 0.5 for uncorrelated channels, 1 for opposite channels), `mode="ratio"` the side to mid ratio in dB, and `mode="energy"` both energies in dB.
@@ -183,38 +181,9 @@ features = [STFT(frame_length=1024, mode=["db", "instantaneous_frequency"]), PQM
 dataset = AudioDataset("path/to/raw/audio", chunk_length=2., features=features)
 ```
 
-## Ambisonics
-
-`AmbisonicEncoder` and `AmbisonicDecoder` convert multichannel signals to and from ambisonics : they give signals, `(..., channels, samples)`, instead of per-frame descriptors. Ambisonic signals follow the AmbiX convention : ACN channel ordering, real spherical harmonics without Condon-Shortley phase, and SN3D normalization (`normalization="n3d"` is also available). Directions are given as `(azimuth, elevation)` in degrees, azimuth counterclockwise from the front (90 : left) and elevation upwards.
-
-Layouts are names of `acids_dataset.features.ambisonics.LAYOUTS` (`"mono"`, `"stereo"`, `"quad"`, `"5.0"`, `"7.0"`, `"octagon"`, `"tetrahedron"`, `"cube"`), or lists of directions.
-
-- `AmbisonicEncoder(order, layout)` encodes `(..., C, T)` into `(..., (N + 1)², T)` : each input channel is a source in the direction given by `layout`. With `layout=None`, the layout is chosen from the number of channels : mono, stereo, or `C` directions equally spaced on the horizontal plane. `order` is `"adaptive"` (default) : the order is inferred from the number of channels, as the lowest order whose encoding can be inverted for the layout (mono gives order 0, stereo and tetrahedra order 1, quad and 5.0 order 2, 7.0 order 3), such that decoding on the same layout gives the input channels back. A fixed order (an integer) raises a `ValueError` for inputs that cannot be encoded invertibly at this order (e.g. 7.0 signals at order 1).
-- `AmbisonicDecoder(layout, order)` decodes `(..., K, T)` to the `L` loudspeakers of `layout`, `(..., L, T)`. With `order="adaptive"` (default), the order is inferred from the number of input channels (`K = (N + 1)²`, otherwise a `ValueError` is raised) ; a fixed order `N` raises a `ValueError` for inputs that do not have `(N + 1)²` channels. With `layout=None`, signals are decoded to `(N + 1)²` virtual loudspeakers spread regularly on the sphere. `method="mode_matching"` (default) inverts the encoding of the layout (pseudo-inverse), while `method="sampling"` projects signals on the harmonics of each loudspeaker (for regular layouts).
-
-```python
-from acids_dataset.features import AmbisonicEncoder, AmbisonicDecoder
-encoder = AmbisonicEncoder(layout="5.0")                  # 5 channels -> second order ambisonics (9 channels)
-decoder = AmbisonicDecoder(layout="5.0")
-dataset = AudioDataset("path/to/5.0/audio", channels=5, chunk_length=2., features=[encoder])
-x = torch.randn(5, 44100)
-assert torch.allclose(decoder(encoder(x)), x, atol=1e-4)  # exact reconstruction
-```
-
-The spherical harmonics of any directions are given by `acids_dataset.features.ambisonics.spherical_harmonics(order, azimuth, elevation)`, as an array `(n_directions, (order + 1)²)`. Encoders and decoders can also be inverted (see [Inverting features](#inverting-features)) : they are each other's inverse. `encoder.inverse(n_channels)` gives the `AmbisonicDecoder` (mode matching) whose loudspeakers are the directions of the input channels, and `decoder.inverse(order)` the `AmbisonicEncoder` whose sources are the loudspeakers ; `invert` uses them.
-
-```python
-encoder = AmbisonicEncoder(layout="5.0")
-decoder = encoder.inverse(5)                                  # AmbisonicDecoder(layout=<5.0 directions>, order=2, method="mode_matching")
-assert torch.allclose(encoder.invert(encoder(x)), x, atol=1e-4)
-encoder = AmbisonicDecoder(layout="cube").inverse(1)          # AmbisonicEncoder(order=1, layout=<cube directions>, strict=False)
-```
-
-Decoders often have more loudspeakers than ambisonic channels : `AmbisonicEncoder(strict=False)` then encodes channels that cannot be encoded invertibly at a fixed order (sources are mixed in ambisonic signals), instead of raising a `ValueError`.
-
 ## Inverting features
 
-Invertible features (`feature.invertible`) give audio back from their outputs with `feature.invert(features, ...)` ; other features raise a `NotImplementedError`. Inversions keep batch dimensions and devices, and `length` crops or zero-pads outputs to the length of the original signal (frame-based features lose the samples after their last frame).
+Invertible features (`feature.invertible`) give audio back from their outputs with `feature.invert(features, ...)` ; other features raise a `NotImplementedError`. The spatial transforms `MidSide`, `AmbisonicEncoder` and `AmbisonicDecoder` are also invertible (see [Spatial transforms](augmentations.md#spatial-transforms)). Inversions keep batch dimensions and devices, and `length` crops or zero-pads outputs to the length of the original signal (frame-based features lose the samples after their last frame).
 
 | feature | `invert` gives | exact inversion |
 | ------- | -------------- | --------------- |
@@ -223,9 +192,6 @@ Invertible features (`feature.invertible`) give audio back from their outputs wi
 | `FFT` | audio | from modes with phase (as `STFT`), with `window=None` or `"hamming"` (hann windows vanish on the first sample). Samples cropped by `n_fft` are lost ; give `length` for signals of odd length |
 | `DCT` | audio, by inverse DCT and weighted overlap-add | with all coefficients (`n_coeffs=None`), and `window=None` or overlapping windows (e.g. `hop_length = frame_length // 2`) ; with hann windows, the `hop_length` first and last samples are inaccurate. Fewer coefficients low-pass frames |
 | `PQMF` | signals from sub-bands (sub-bands from signals with `inverse=True`) | near perfect reconstruction (about -60 dB) |
-| `MidSide` | left / right signals (mid / side with `inverse=True`) | always |
-| `AmbisonicEncoder` | input channels, decoded by `inverse(C)` (an `AmbisonicDecoder` in the directions of the input channels) | always (encodings are invertible). The order is inferred from the number of ambisonic channels (or checked against the fixed order), and the number of channels is given by the layout ; with `layout=None`, several numbers of channels give the same order (e.g. stereo and 3 channels give order 1), and the number of channels is inferred from signals (or given with `n_channels`) |
-| `AmbisonicDecoder` | ambisonic signals, encoded by `inverse(order)` (an `AmbisonicEncoder` whose sources are the loudspeakers) with mode matching ; by the pseudo-inverse of the decoding matrix with `method="sampling"` (re-encoding only inverts sampling decoders on regular layouts) | if the layout determines every component (at least `(N + 1)²` loudspeakers in independent directions, e.g. `layout=None`) ; horizontal layouts lose vertical components. The order is the fixed order, or is inferred from the number of loudspeakers (`(N + 1)²` with `layout=None` ; with a layout that can hold several orders, from signals, or given with `order`) |
 
 ```python
 from acids_dataset.features import DGT, DCT, FFT

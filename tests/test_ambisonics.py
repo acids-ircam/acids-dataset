@@ -74,3 +74,49 @@ def test_errors():
         AmbisonicEncoder(order=-1)
     with pytest.raises(ValueError):
         AmbisonicEncoder(layout="unknown")(torch.randn(2, 10))
+
+
+@pytest.mark.parametrize("layout", list(LAYOUTS) + [None])
+def test_encoder_inverse_is_decoder(layout):
+    import numpy as np
+    n = len(get_layout(layout)) if layout is not None else 3
+    encoder = AmbisonicEncoder(layout=layout)
+    decoder = encoder.inverse(n)
+    assert isinstance(decoder, AmbisonicDecoder) and decoder.method == "mode_matching"
+    assert decoder.order == encoder.get_order(n)
+    # same matrix as the pseudo-inverse of the encoding
+    assert np.allclose(decoder.decoding_matrix(decoder.order), np.linalg.pinv(encoder.encoding_matrix(n)), atol=1e-8)
+    x = torch.randn(2, n, 300)
+    assert torch.allclose(encoder.invert(encoder(x)), x, atol=1e-4)
+
+
+@pytest.mark.parametrize("layout,order", [(None, 1), (None, 2), ("cube", 1), ("octagon", 1), ("7.0", 2)])
+def test_decoder_inverse_is_encoder(layout, order):
+    import numpy as np
+    decoder = AmbisonicDecoder(layout=layout)
+    encoder = decoder.inverse(order)
+    assert isinstance(encoder, AmbisonicEncoder) and encoder.order == order and not encoder.strict
+    n_speakers = len(decoder.directions(order))
+    # the encoding of loudspeaker directions is the pseudo-inverse of the mode matching decoding
+    assert np.allclose(encoder.encoding_matrix(n_speakers), np.linalg.pinv(decoder.decoding_matrix(order)), atol=1e-8)
+    a = torch.randn(2, (order + 1) ** 2, 300)
+    speakers = decoder(a)
+    assert torch.allclose(decoder.invert(speakers, order=order), encoder(speakers), atol=1e-5)
+
+
+def test_strict_encoding():
+    # 8 loudspeakers cannot be encoded invertibly at order 1, unless strict=False
+    with pytest.raises(ValueError):
+        AmbisonicEncoder(order=1, layout="cube")(torch.randn(8, 100))
+    assert AmbisonicEncoder(order=1, layout="cube", strict=False)(torch.randn(8, 100)).shape == (4, 100)
+
+
+def test_sampling_decoder_inverse_on_regular_layouts():
+    # sampling decoders are inverted by re-encoding on regular layouts (cube : spherical 3-design), by pseudo-inverse otherwise
+    a = torch.randn((1 + 1) ** 2, 300)
+    decoder = AmbisonicDecoder(layout="cube", method="sampling")
+    assert torch.allclose(decoder.inverse(1)(decoder(a)), a, atol=1e-4)
+    assert torch.allclose(decoder.invert(decoder(a), order=1), a, atol=1e-4)
+    fibonacci = AmbisonicDecoder(method="sampling")
+    a = torch.randn(9, 300)
+    assert torch.allclose(fibonacci.invert(fibonacci(a)), a, atol=1e-3)

@@ -132,7 +132,11 @@ class AmbisonicEncoder(_WaveformFeature):
     can be encoded by the same feature. With a fixed order N (an integer), inputs whose channels cannot be encoded
     invertibly at order N (e.g. 7.0 signals at order 1) raise a ValueError.
 
-    invert decodes ambisonic signals back to the input channels (exactly, as encodings are invertible). The order is
+    With strict=False, fixed orders also encode channels that cannot be encoded invertibly (e.g. loudspeaker signals,
+    as in AmbisonicDecoder.invert) : sources are then mixed in the ambisonic signals.
+
+    invert decodes ambisonic signals back to the input channels with an AmbisonicDecoder (mode matching) in the
+    directions of the input channels (see inverse) : inversion is exact, as encodings are invertible. The order is
     inferred from the number of ambisonic channels ((N + 1)^2, or a ValueError is raised ; with a fixed order, other
     numbers of channels raise a ValueError), and the number of channels from the layout. With layout=None, several
     numbers of channels can give the same order (e.g. stereo and 3 channels give order 1) : the number of channels is
@@ -141,10 +145,10 @@ class AmbisonicEncoder(_WaveformFeature):
     invertible = True
 
     def __init__(self, order: int | str = "adaptive", layout: str | list | None = None, normalization: str = "sn3d",
-                 sr: int = 44100, **kwargs):
+                 strict: bool = True, sr: int = 44100, **kwargs):
         _check_order(order)
         assert normalization in NORMALIZATIONS, "normalization must be in %s, got %s"%(NORMALIZATIONS, normalization)
-        self.order, self.layout, self.normalization = order, layout, normalization
+        self.order, self.layout, self.normalization, self.strict = order, layout, normalization, strict
         super().__init__(sr=sr, **kwargs)
 
     def __repr__(self):
@@ -168,7 +172,7 @@ class AmbisonicEncoder(_WaveformFeature):
         """ambisonic order used for inputs with n_channels channels : inferred with adaptive orders, and checked
         with fixed orders (raises a ValueError if the channels cannot be encoded invertibly)."""
         if self.order != "adaptive":
-            if _rank(self._harmonics(self.order, n_channels)) != n_channels:
+            if getattr(self, "strict", True) and _rank(self._harmonics(self.order, n_channels)) != n_channels:
                 raise ValueError("%d channels (layout %s) cannot be encoded invertibly at order %d"%(n_channels, self.layout, self.order))
             return self.order
         # C distinct directions are always separated by harmonics of order C - 1
@@ -192,9 +196,15 @@ class AmbisonicEncoder(_WaveformFeature):
         except ValueError:
             return None
 
+    def inverse(self, n_channels: int) -> "AmbisonicDecoder":
+        """decoder inverting the encoding of n_channels channels : AmbisonicDecoder (mode matching) at the order of the
+        encoding, whose loudspeakers are the directions of the input channels."""
+        return AmbisonicDecoder(layout=self._directions(n_channels).tolist(), order=self.get_order(n_channels),
+                                normalization=self.normalization, method="mode_matching", sr=self.sr, device=self.device)
+
     def invert(self, features, n_channels: int | None = None) -> torch.Tensor:
-        """input channels (..., C, T) from ambisonic signals (..., (N + 1)^2, T). The number of channels C is given by
-        the layout, by n_channels if given, or inferred from signals (layout=None)."""
+        """input channels (..., C, T) from ambisonic signals (..., (N + 1)^2, T), decoded with inverse(C). The number of
+        channels C is given by the layout, by n_channels if given, or inferred from signals (layout=None)."""
         a = _as_tensor(features)
         order = ambisonic_order(a.shape[-2])
         if self.order != "adaptive" and order != self.order:
@@ -207,10 +217,10 @@ class AmbisonicEncoder(_WaveformFeature):
                 if len(candidates) == 0:
                     raise ValueError("no number of channels is encoded at order %d"%order)
                 n_channels = _select(a, candidates, self.encoding_matrix, "number of channels")
-        encoding = self.encoding_matrix(n_channels)
-        if encoding.shape[0] != a.shape[-2]:
-            raise ValueError("encoding of %d channels gives %d ambisonic channels, got %d"%(n_channels, encoding.shape[0], a.shape[-2]))
-        return torch.as_tensor(np.linalg.pinv(encoding), dtype=a.dtype, device=a.device) @ a
+        if ambisonic_channels(self.get_order(n_channels)) != a.shape[-2]:
+            raise ValueError("encoding of %d channels gives %d ambisonic channels, got %d"%(
+                n_channels, ambisonic_channels(self.get_order(n_channels)), a.shape[-2]))
+        return self.inverse(n_channels)(a)
 
 
 @gin.configurable(module="features")
@@ -230,11 +240,13 @@ class AmbisonicDecoder(_WaveformFeature):
           with AmbisonicEncoder on the same layout gives the original signals back (if the order is high enough).
         - "sampling" : spherical harmonics of each loudspeaker direction, scaled by 1 / L (best for regular layouts).
 
-    invert encodes loudspeaker signals back to ambisonics. The order is the fixed order, or is inferred from the number
-    of loudspeakers : (N + 1)^2 loudspeakers with layout=None ; with a layout, the lowest order (with (N + 1)^2 <= L)
-    whose decoding gives the signals (or order, if given). Inversion is exact if the layout determines every ambisonic
-    component (at least (N + 1)^2 loudspeakers in independent directions, e.g. layout=None) ; horizontal layouts lose
-    vertical components.
+    invert encodes loudspeaker signals back to ambisonics. With mode matching, they are encoded with an
+    AmbisonicEncoder whose sources are the loudspeakers (see inverse) ; sampling decoders are not inverted by encoders
+    (except on regular layouts), and are inverted with the pseudo-inverse of their decoding matrix. The order is the
+    fixed order, or is inferred from the number of loudspeakers : (N + 1)^2 loudspeakers with layout=None ; with a
+    layout, the lowest order (with (N + 1)^2 <= L) whose decoding gives the signals (or order, if given). Inversion is
+    exact if the layout determines every ambisonic component (at least (N + 1)^2 loudspeakers in independent
+    directions, e.g. layout=None) ; horizontal layouts lose vertical components.
     """
     methods = ["mode_matching", "sampling"]
     invertible = True
@@ -266,9 +278,20 @@ class AmbisonicDecoder(_WaveformFeature):
     def n_loudspeakers(self, order: int) -> int:
         return ambisonic_channels(order) if self.layout is None else len(get_layout(self.layout))
 
+    def directions(self, order: int) -> np.ndarray:
+        """directions (L, 2) of loudspeakers, in degrees."""
+        return fibonacci_sphere(ambisonic_channels(order)) if self.layout is None else get_layout(self.layout)
+
+    def inverse(self, order: int) -> "AmbisonicEncoder":
+        """encoder inverting mode matching decodings at order : AmbisonicEncoder at this order, whose sources are the
+        loudspeakers (strict=False, as layouts may have more loudspeakers than ambisonic channels). Sampling decoders
+        are only inverted by this encoder on regular layouts."""
+        return AmbisonicEncoder(order=order, layout=self.directions(order).tolist(), normalization=self.normalization,
+                                strict=False, sr=self.sr, device=self.device)
+
     def decoding_matrix(self, order: int) -> np.ndarray:
         """decoding matrix (L, (order + 1)^2)."""
-        directions = fibonacci_sphere(ambisonic_channels(order)) if self.layout is None else get_layout(self.layout)
+        directions = self.directions(order)
         harmonics = spherical_harmonics(order, directions[:, 0], directions[:, 1], self.normalization)    # (L, K)
         if self.method == "mode_matching":
             return np.linalg.pinv(harmonics.T)
@@ -300,10 +323,12 @@ class AmbisonicDecoder(_WaveformFeature):
                     raise ValueError("layout has %d loudspeakers, got %d channels"%(len(get_layout(self.layout)), n_speakers))
                 candidates = [n for n in range(int(math.sqrt(n_speakers))) if ambisonic_channels(n) <= n_speakers]
                 order = _select(s, candidates, self.decoding_matrix, "order")
-        decoding = self.decoding_matrix(order)
-        if decoding.shape[0] != n_speakers:
-            raise ValueError("decoding at order %d gives %d loudspeakers, got %d channels"%(order, decoding.shape[0], n_speakers))
-        return torch.as_tensor(np.linalg.pinv(decoding), dtype=s.dtype, device=s.device) @ s
+        if len(self.directions(order)) != n_speakers:
+            raise ValueError("decoding at order %d gives %d loudspeakers, got %d channels"%(order, len(self.directions(order)), n_speakers))
+        if self.method == "mode_matching":
+            # the encoding matrix of loudspeaker directions is the pseudo-inverse of the decoding matrix
+            return self.inverse(order)(s)
+        return torch.as_tensor(np.linalg.pinv(self.decoding_matrix(order)), dtype=s.dtype, device=s.device) @ s
 
 
 __all__ = ['AmbisonicEncoder', 'AmbisonicDecoder', 'spherical_harmonics', 'get_layout', 'LAYOUTS']

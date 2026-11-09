@@ -82,7 +82,7 @@
 ::: acids_dataset.features.quality
     options:
       show_root_heading: false
-      members: [ClippingRatio, DCOffset, DynamicRange, SilenceRatio]
+      members: [Peak, LoudnessMeter, a_weighting, ClippingRatio, DCOffset, DynamicRange, SilenceRatio]
 
 ## Metadata and embeddings
 

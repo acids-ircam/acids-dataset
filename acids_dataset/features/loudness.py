@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from . import RAISE_EXC_IF_FEATURE_ERROR
 from .base import AcidsDatasetFeature
-from ..utils import loudness, frame_with_pad
+from ..utils import loudness, frame_with_pad, level, LOUDNESS_MODES
 
 
 @gin.configurable(module="features")
@@ -18,10 +18,18 @@ class Loudness(AcidsDatasetFeature):
             keep_channels: bool = True,
             sr: int = 44100, 
             min_loudness: float | None = -70.,
+            mode: str = "lufs",
             **kwargs
     ):
-        """Loudness (LUFS), per frame if frame_length is given. Values are floored to min_loudness (by default -70 LUFS, 
-        the absolute gate of loudness measurements), such that silence does not give -inf ; None keeps -inf for silence."""
+        """Loudness, per frame if frame_length is given (non-overlapping frames), per channel with keep_channels. mode 
+        sets the measure : "lufs" (default) for loudness in LUFS (ITU-R BS.1770 ; without keep_channels, combined 
+        loudness of channels), "db" for the RMS level in dBFS, "dba" for the A-weighted RMS level in dB(A) (IEC 61672, 
+        0 dB at 1 kHz ; without keep_channels, db and dba are the levels of the mix of channels). Values are floored to 
+        min_loudness (by default -70, the absolute gate of LUFS measurements), such that silence does not give -inf ; 
+        None keeps -inf for silence. The default name is "loudness" in LUFS, "loudness_<mode>" otherwise."""
+        if mode not in LOUDNESS_MODES:
+            raise ValueError("mode must be in %s, got %s"%(LOUDNESS_MODES, mode))
+        self.mode = mode
         super().__init__(**kwargs)
         self.min_loudness = min_loudness
         self.frame_length = frame_length
@@ -30,7 +38,9 @@ class Loudness(AcidsDatasetFeature):
         self.kwargs = kwargs
 
     def __repr__(self):
-        return "Loudness(sr=%d)"%(self.sr)
+        mode = getattr(self, "mode", "lufs")
+        # representation of LUFS loudness is kept, such that existing pre-processed / baked features stay valid
+        return "Loudness(sr=%d)"%(self.sr) if mode == "lufs" else "Loudness(mode=%s, sr=%d)"%(mode, self.sr)
 
     @property
     def has_hash(self):
@@ -38,7 +48,8 @@ class Loudness(AcidsDatasetFeature):
 
     @property
     def default_feature_name(self):
-        return "loudness"
+        mode = getattr(self, "mode", "lufs")
+        return "loudness" if mode == "lufs" else "loudness_%s"%mode
 
     def from_fragment(self, fragment, write: bool = True):
         data = torch.from_numpy(fragment.raw_audio).float()
@@ -51,7 +62,7 @@ class Loudness(AcidsDatasetFeature):
             fragment.put_array(self.feature_name, data_loudness)
 
     def __call__(self, data) -> torch.Tensor:
-        data_loudness = loudness(data, sample_rate=self.sr, frame_length=self.frame_length, keep_channels=self.keep_channels)
+        data_loudness = level(data, self.sr, mode=getattr(self, "mode", "lufs"), frame_length=self.frame_length, keep_channels=self.keep_channels)
         # features pickled before min_loudness have no floor
         min_loudness = getattr(self, "min_loudness", None)
         if min_loudness is not None:
@@ -59,13 +70,15 @@ class Loudness(AcidsDatasetFeature):
         return data_loudness
 
     def script(self):
-        return LoudnessScript(frame_length=self.frame_length, sr=self.sr, keep_channels=self.keep_channels, min_loudness=getattr(self, "min_loudness", None))
+        return LoudnessScript(frame_length=self.frame_length, sr=self.sr, keep_channels=self.keep_channels, min_loudness=getattr(self, "min_loudness", None),
+                              mode=getattr(self, "mode", "lufs"))
 
 
 class LoudnessScript(torch.nn.Module):
     """TorchScript-compatible loudness module (pure-PyTorch K-weighting, no torchaudio dependency)."""
 
     frame_length: Optional[int]
+    mode: str
     sr: int
     keep_channels: bool
     min_loudness: Optional[float]
@@ -86,8 +99,12 @@ class LoudnessScript(torch.nn.Module):
         keep_channels: bool = True,
         sr: int = 44100,
         min_loudness: Optional[float] = -70.,
+        mode: str = "lufs",
     ):
         super().__init__()
+        if mode not in ["lufs", "db", "dba"]:
+            raise ValueError("mode must be lufs, db or dba, got %s"%mode)
+        self.mode = mode
         self.min_loudness = min_loudness
         self.frame_length = frame_length
         self.sr = sr
@@ -136,7 +153,38 @@ class LoudnessScript(torch.nn.Module):
             y[..., t] = yt
         return y
 
+    def _rms_level(self, waveform: torch.Tensor) -> torch.Tensor:
+        """RMS level in dBFS (mode "db") or dB(A) (mode "dba"), as utils.rms_level."""
+        x = waveform
+        frame_length = self.frame_length
+        if frame_length is not None:
+            T = x.size(-1)
+            x = x[..., :frame_length * (T // frame_length)].unfold(-1, frame_length, frame_length)
+        else:
+            x = x.unsqueeze(-2)
+        if not self.keep_channels:
+            x = x.mean(-3)
+        if self.mode == "dba":
+            n = x.size(-1)
+            spectrum = torch.fft.rfft(x, dim=-1).abs().square()
+            f2 = torch.fft.rfftfreq(n, d=1.0 / self.sr).to(x.device).to(x.dtype).square()
+            ra = (12194. ** 2) * f2.square() / ((f2 + 20.6 ** 2) * torch.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) * (f2 + 12194. ** 2))
+            weights = (ra * 10 ** (2. / 20)).square()
+            weights[1:(n + 1) // 2] *= 2
+            power = (spectrum * weights).sum(-1) / float(n * n)
+        else:
+            power = x.square().mean(-1)
+        out = 10.0 * torch.log10(power)
+        if frame_length is None:
+            out = out.squeeze(-1)
+        min_loudness = self.min_loudness
+        if min_loudness is not None:
+            out = out.clamp(min=min_loudness)
+        return out
+
     def forward(self, waveform: torch.Tensor) -> torch.Tensor:
+        if self.mode != "lufs":
+            return self._rms_level(waveform)
         C = waveform.size(-2)
         if C > 5:
             raise ValueError("Only up to 5 channels are supported.")

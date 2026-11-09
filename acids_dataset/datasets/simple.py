@@ -7,6 +7,7 @@ from math import ceil
 import os
 from absl import logging
 import random, math, itertools
+import torchaudio
 from collections import deque
 import copy
 from typing import Optional, List , Dict, Iterable
@@ -19,8 +20,14 @@ from .base import AudioDataset, TransformType, chunk_length_to_samples
 class PreprocessedAudioDataset(AudioDataset):
     """AudioDataset loading fragments from a pre-processed dataset folder (see preprocess_dataset). Pre-processed features
     are read from the database, and describe the original audio ; features_after_transforms only applies to batch features
-    (see get_loader)."""
+    (see get_loader).
+
+    If sr is given and differs from the sampling rate of the pre-processed audio, loaded audio (waveform of items,
+    load_audio, get_fragment) is resampled to sr ; chunk_length and metadata['sr'] then refer to sr. Pre-processed
+    features are read as stored (they keep their own frame rate)."""
     _default_partition_name = "partitions"
+    # context (in stored samples) loaded around audio before resampling (see load_audio)
+    _resampling_context = 256
 
     @classmethod
     def _init_from_preset(cls, preset, preset_overrides, *args, **kwargs):
@@ -31,9 +38,9 @@ class PreprocessedAudioDataset(AudioDataset):
             metadata = dataset.metadata
             preset_sr = query_preset_value("SAMPLE_RATE")
             preset_chunk_length = query_preset_value("CHUNK_LENGTH")
-            if preset_sr is not None and preset_sr != metadata.get('sr'):
-                logging.warning("dataset %s was pre-processed with sr=%s, but preset %s has SAMPLE_RATE=%s"%(dataset.path, metadata.get('sr'), preset, preset_sr))
-            if preset_chunk_length is not None and chunk_length_to_samples(preset_chunk_length, metadata['sr']) != dataset.chunk_length:
+            if preset_sr is not None and preset_sr != dataset.sr:
+                logging.warning("dataset %s is loaded with sr=%s, but preset %s has SAMPLE_RATE=%s (give sr to resample loaded audio)"%(dataset.path, dataset.sr, preset, preset_sr))
+            if preset_chunk_length is not None and chunk_length_to_samples(preset_chunk_length, dataset.sr) != dataset.chunk_length:
                 logging.warning("dataset %s was pre-processed with chunk_length=%s samples, but preset %s has CHUNK_LENGTH=%s"%(dataset.path, dataset.chunk_length, preset, preset_chunk_length))
         return dataset
     def __init__(self,
@@ -43,6 +50,7 @@ class PreprocessedAudioDataset(AudioDataset):
                  required_fields: Iterable[str] = [],
                  output_type: str = "torch",
                  channels: int = 1, 
+                 sr: int | None = None,
                  lazy_paths: bool = False,
                  subindices: Iterable[int] | Iterable[bytes] | None = None,
                  parent = None,
@@ -62,6 +70,7 @@ class PreprocessedAudioDataset(AudioDataset):
                           features_after_transforms=features_after_transforms)
         self._loader = get_writer_class_from_path(path).loader(self._db_path, output_type=output_type) 
         self._metadata = get_metadata_from_path(path)
+        self._set_sr(sr)
         self._required_fields = required_fields
         # file information, built when needed
         self._files = None
@@ -84,16 +93,54 @@ class PreprocessedAudioDataset(AudioDataset):
         elif (self._subindices is not None) and isinstance(index, (str, bytes)):
             #TODO think about this : allow or not? 
             pass
-        return self._loader[index]
+        fragment = self._loader[index]
+        if self.is_resampled and fragment.has_buffer('waveform'):
+            wav = torch.as_tensor(fragment.get_audio('waveform')).float()
+            fragment.put_audio('waveform', self._resample(wav), dtype="float32", sr=self.sr)
+        return fragment
+
+    # resampling
+
+    def _set_sr(self, sr: int | None) -> None:
+        if sr is not None and int(sr) <= 0:
+            raise ValueError("sr must be positive, got %s"%sr)
+        self._sr = None if sr is None or int(sr) == self.stored_sr else int(sr)
+        self._resampler = None
+        if self._sr is not None and not self._metadata.get('waveform', True):
+            logging.warning("dataset %s was pre-processed without waveform : sr only applies to audio rebuilt with load_audio"%self.path)
+
+    @property
+    def stored_sr(self) -> int:
+        """sampling rate of the pre-processed audio."""
+        return int(self._metadata['sr'])
+
+    @property
+    def sr(self) -> int:
+        """sampling rate of loaded audio."""
+        return self._sr or self.stored_sr
+
+    @property
+    def is_resampled(self) -> bool:
+        return getattr(self, "_sr", None) is not None
+
+    def _resample(self, wav: torch.Tensor) -> torch.Tensor:
+        if self._resampler is None:
+            # resampling kernels are computed once
+            self._resampler = torchaudio.transforms.Resample(self.stored_sr, self.sr)
+        return self._resampler(wav)
 
     def configure(self, chunk_length: int | float | None = None, features_after_transforms: bool | None = None, **kwargs) -> "PreprocessedAudioDataset":
-        if chunk_length is not None and chunk_length_to_samples(chunk_length, self._metadata['sr']) != self.chunk_length:
+        if chunk_length is not None and chunk_length_to_samples(chunk_length, self.sr) != self.chunk_length:
             raise ValueError("chunk_length of pre-processed datasets is fixed (here, %d samples)"%self.chunk_length)
         return super().configure(features_after_transforms=features_after_transforms, **kwargs)
 
     @property
     def chunk_length(self) -> int:
-        return chunk_length_to_samples(float(self._metadata['chunk_length']), int(self._metadata['sr']))
+        """chunk length of items, in samples at the sampling rate of loaded audio."""
+        stored = chunk_length_to_samples(float(self._metadata['chunk_length']), self.stored_sr)
+        if not self.is_resampled:
+            return stored
+        return int(math.ceil(stored * self.sr / self.stored_sr))
 
     @property
     def path(self):
@@ -132,15 +179,39 @@ class PreprocessedAudioDataset(AudioDataset):
 
     def load_audio(self, file_idx: int, start: float = 0., length: int | float | None = None, pad_mode: PadMode | str | None = None) -> torch.Tensor:
         """loads audio of a given file, rebuilt from the chunks stored in the database (at the sampling rate of the 
-        dataset). Parts of the file that were not stored (e.g. discarded chunks) are filled with zeros, and audio 
+        dataset, see sr). Parts of the file that were not stored (e.g. discarded chunks) are filled with zeros, and audio 
         requested beyond the end of the file is padded with pad_mode (zero by default).
 
         Args:
             file_idx (int): file index (in self.files).
             start (float, optional): start position (seconds). Defaults to 0.
-            length (int | float | None, optional): length, in samples (int) or seconds (float). None for the whole file. Defaults to None.
+            length (int | float | None, optional): length, in samples (int, at the sampling rate of the dataset) or seconds 
+                (float). None for the whole file. Defaults to None.
             pad_mode (PadMode | str | None, optional): padding mode beyond the end of the file. Defaults to None (zero).
         """
+        if not self.is_resampled:
+            return self._load_stored_audio(file_idx, start=start, length=length, pad_mode=pad_mode)
+        orig_sr, target_sr = self.stored_sr, self.sr
+        start_smp = int(round(start * orig_sr))
+        target_length = None if length is None else chunk_length_to_samples(length, target_sr)
+        n_stored = None if target_length is None else int(math.ceil(target_length * orig_sr / target_sr))
+        # audio is loaded with surrounding context, such that resampled audio has no edge effects (as in OnlineAudioDataset). 
+        # Left context is a multiple of the resampling period, to be trimmed exactly after resampling.
+        period = orig_sr // math.gcd(orig_sr, target_sr)
+        context = int(math.ceil(self._resampling_context / period)) * period
+        left_context = min(context, (start_smp // period) * period)
+        right_context = context if n_stored is not None else 0
+        wav = self._load_stored_audio(file_idx, start=(start_smp - left_context) / orig_sr, 
+                                      length=None if n_stored is None else n_stored + left_context + right_context, pad_mode=pad_mode)
+        wav = self._resample(wav)[..., left_context * target_sr // orig_sr:]
+        if target_length is not None:
+            wav = wav[..., :target_length]
+            if wav.shape[-1] < target_length:
+                wav = pad(wav, target_length, pad_mode or PadMode.ZERO)
+        return wav
+
+    def _load_stored_audio(self, file_idx: int, start: float = 0., length: int | float | None = None, pad_mode: PadMode | str | None = None) -> torch.Tensor:
+        """loads audio of a given file at the sampling rate of the pre-processed audio (see load_audio)."""
         if not self._metadata.get('waveform', True):
             raise ValueError("dataset %s was pre-processed without waveform : audio cannot be loaded"%self.path)
         file = self.files[file_idx]
@@ -171,12 +242,17 @@ class PreprocessedAudioDataset(AudioDataset):
         wav = self.load_audio(file_idx, start=start, length=length, **kwargs)
         features = list(self.features.values()) if features is None else features
         fragment_class = get_fragment_class(self._metadata.get('fragment_class', 'AcidsFragment'))
-        return self._build_fragment(fragment_class, wav, file['sr'], file['audio_path'], start, file['duration'], features, 
+        return self._build_fragment(fragment_class, wav, self.sr, file['audio_path'], start, file['duration'], features, 
                                     output_type=self._output_type)
 
     @property 
     def metadata(self):
-        return copy.copy(self._metadata)
+        """metadata of the pre-processed dataset ; sr is the sampling rate of loaded audio (stored_sr the one of 
+        pre-processed audio, if different)."""
+        metadata = copy.copy(self._metadata)
+        if self.is_resampled:
+            metadata.update(sr=self.sr, stored_sr=self.stored_sr)
+        return metadata
 
     @property
     def loader(self): 

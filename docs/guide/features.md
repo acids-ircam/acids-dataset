@@ -62,7 +62,9 @@ Each descriptor is a feature (computed in pre-processing or online, and in [batc
 | | `GeneralizedCrossCorrelation` | `(P, n_frames)`, samples or seconds (or `(P, n_lags, n_frames)`) | GCC-PHAT (and other weightings) delays between pairs of channels |
 | | `Pan` | per frame, [-1, 1] | stereo position from the energies of the first two channels |
 | | `AmbisonicEncoder`, `AmbisonicDecoder` | `((N + 1)², T)`, `(L, T)` | ambisonic encoding and decoding, see [Ambisonics](#ambisonics) |
-| quality | `ClippingRatio` | per chunk | ratio of clipped samples |
+| quality | `Peak` | per chunk (per channel), linear (or dBFS) | maximum absolute amplitude |
+| | `LoudnessMeter` | per chunk, `(n_values,)`, dB / dB(A) / LUFS | statistics of frame levels, see [Loudness](#loudness) |
+| | `ClippingRatio` | per chunk | ratio of clipped samples |
 | | `DCOffset` | per chunk (per channel) | mean value |
 | | `DynamicRange` | per chunk, dB | difference between high and low percentiles of frame levels |
 | | `SilenceRatio` | per chunk | ratio of silent frames |
@@ -77,6 +79,34 @@ Per-chunk descriptors can be used for [balancing](sampling.md#class-balancing) a
 ## Loudness
 
 `Loudness` gives the loudness in LUFS (per frame with `frame_length`, per channel with `keep_channels`). Values are floored to `min_loudness` (-70 LUFS by default, the absolute gate of loudness measurements), such that silence gives -70 instead of `-inf` (that would give NaN in losses) ; `min_loudness=None` keeps `-inf`.
+
+`mode` sets the measure : `"lufs"` (default, ITU-R BS.1770 ; without `keep_channels`, combined loudness of channels), `"db"` for the RMS level in dBFS, or `"dba"` for the A-weighted RMS level in dB(A) (IEC 61672, 0 dB at 1 kHz). `db` and `dba` levels use the same frames and give the same shapes as LUFS ; without `keep_channels`, they are the levels of the mix of channels. Their default names are `loudness_db` and `loudness_dba`, such that several modes can be computed together, and they are also exported by `script()`. The same measures are available as functions in `acids_dataset.utils` : `level(x, sr, mode)`, `loudness`, `rms_level`.
+
+```python
+from acids_dataset.features import Loudness
+dataset = AudioDataset("path/to/raw/audio", chunk_length=1., features=[Loudness(), Loudness(mode="dba", frame_length=2048)],
+                       output_pattern="{waveform,loudness,loudness_dba}")
+```
+
+`LoudnessMeter` gives statistics of the levels of the frames of a chunk (`frame_length`, 2048, `hop_length`), concatenated in the last dimension in the order of `properties` :
+
+| Level | Properties | Measure |
+| ----- | ---------- | ------- |
+| `db` | `min_db`, `max_db`, `db_quantiles` | RMS level, in dBFS |
+| `dba` | `min_dba`, `max_dba`, `dba_quantiles` | A-weighted RMS level, in dB(A) (IEC 61672, 0 dB at 1 kHz) |
+| `lufs` | `min_lufs`, `max_lufs`, `lufs_quantiles` | loudness, in LUFS (ITU-R BS.1770, as `Loudness`) |
+
+```python
+from acids_dataset.features import LoudnessMeter
+meter = LoudnessMeter(properties=["min_db", "max_db", "lufs_quantiles"], n_quantiles=5, sr=44100)
+meter(x)              # (..., 1 + 1 + 5)
+meter.output_names    # ["min_db", "max_db", "lufs_q0", "lufs_q0.25", "lufs_q0.5", "lufs_q0.75", "lufs_q1"]
+```
+
+- `min_*` / `max_*` give 1 value each, `*_quantiles` give `n_quantiles` values (10 by default), at probabilities evenly spaced from 0 to 1 (the first one is the minimum, the last one the maximum). `output_names` labels the values of the output.
+- Without `keep_channels`, `db` and `dba` levels are the ones of the mix of channels, and `lufs` the combined loudness of channels (BS.1770, up to 5 channels) ; with `keep_channels=True`, levels are measured on each channel, and outputs are `(..., C, n_values)`.
+- Levels of silent frames are floored to `floor_db` (-120 by default) : in LUFS, frames below the absolute gate (-70 LUFS) are silent. Silent frames are included in statistics.
+- Levels are measured on frames : they are not the integrated loudness of the chunk (given by `Loudness`).
 
 ## Spatial features
 
@@ -171,7 +201,16 @@ x = torch.randn(5, 44100)
 assert torch.allclose(decoder(encoder(x)), x, atol=1e-4)  # exact reconstruction
 ```
 
-The spherical harmonics of any directions are given by `acids_dataset.features.ambisonics.spherical_harmonics(order, azimuth, elevation)`, as an array `(n_directions, (order + 1)²)`. Encoders and decoders can also be inverted (see [Inverting features](#inverting-features)).
+The spherical harmonics of any directions are given by `acids_dataset.features.ambisonics.spherical_harmonics(order, azimuth, elevation)`, as an array `(n_directions, (order + 1)²)`. Encoders and decoders can also be inverted (see [Inverting features](#inverting-features)) : they are each other's inverse. `encoder.inverse(n_channels)` gives the `AmbisonicDecoder` (mode matching) whose loudspeakers are the directions of the input channels, and `decoder.inverse(order)` the `AmbisonicEncoder` whose sources are the loudspeakers ; `invert` uses them.
+
+```python
+encoder = AmbisonicEncoder(layout="5.0")
+decoder = encoder.inverse(5)                                  # AmbisonicDecoder(layout=<5.0 directions>, order=2, method="mode_matching")
+assert torch.allclose(encoder.invert(encoder(x)), x, atol=1e-4)
+encoder = AmbisonicDecoder(layout="cube").inverse(1)          # AmbisonicEncoder(order=1, layout=<cube directions>, strict=False)
+```
+
+Decoders often have more loudspeakers than ambisonic channels : `AmbisonicEncoder(strict=False)` then encodes channels that cannot be encoded invertibly at a fixed order (sources are mixed in ambisonic signals), instead of raising a `ValueError`.
 
 ## Inverting features
 
@@ -185,8 +224,8 @@ Invertible features (`feature.invertible`) give audio back from their outputs wi
 | `DCT` | audio, by inverse DCT and weighted overlap-add | with all coefficients (`n_coeffs=None`), and `window=None` or overlapping windows (e.g. `hop_length = frame_length // 2`) ; with hann windows, the `hop_length` first and last samples are inaccurate. Fewer coefficients low-pass frames |
 | `PQMF` | signals from sub-bands (sub-bands from signals with `inverse=True`) | near perfect reconstruction (about -60 dB) |
 | `MidSide` | left / right signals (mid / side with `inverse=True`) | always |
-| `AmbisonicEncoder` | input channels | always (encodings are invertible). The order is inferred from the number of ambisonic channels (or checked against the fixed order), and the number of channels is given by the layout ; with `layout=None`, several numbers of channels give the same order (e.g. stereo and 3 channels give order 1), and the number of channels is inferred from signals (or given with `n_channels`) |
-| `AmbisonicDecoder` | ambisonic signals | if the layout determines every component (at least `(N + 1)²` loudspeakers in independent directions, e.g. `layout=None`) ; horizontal layouts lose vertical components. The order is the fixed order, or is inferred from the number of loudspeakers (`(N + 1)²` with `layout=None` ; with a layout that can hold several orders, from signals, or given with `order`) |
+| `AmbisonicEncoder` | input channels, decoded by `inverse(C)` (an `AmbisonicDecoder` in the directions of the input channels) | always (encodings are invertible). The order is inferred from the number of ambisonic channels (or checked against the fixed order), and the number of channels is given by the layout ; with `layout=None`, several numbers of channels give the same order (e.g. stereo and 3 channels give order 1), and the number of channels is inferred from signals (or given with `n_channels`) |
+| `AmbisonicDecoder` | ambisonic signals, encoded by `inverse(order)` (an `AmbisonicEncoder` whose sources are the loudspeakers) with mode matching ; by the pseudo-inverse of the decoding matrix with `method="sampling"` (re-encoding only inverts sampling decoders on regular layouts) | if the layout determines every component (at least `(N + 1)²` loudspeakers in independent directions, e.g. `layout=None`) ; horizontal layouts lose vertical components. The order is the fixed order, or is inferred from the number of loudspeakers (`(N + 1)²` with `layout=None` ; with a layout that can hold several orders, from signals, or given with `order`) |
 
 ```python
 from acids_dataset.features import DGT, DCT, FFT

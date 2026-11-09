@@ -7,7 +7,7 @@ loader = dataset.get_loader(batch_size=16, num_workers=4, drop_last=True)
 loader = dataset.get_loader(batch_size=16, max_samples=10000, replacement=True) # fixed number of samples per epoch
 ```
 
-The chunk length of pre-processed datasets is fixed at compilation : giving a different `chunk_length` to `get_loader` raises an error.
+The chunk length of pre-processed datasets is fixed at compilation : giving a different `chunk_length` to `get_loader` raises an error. With `sr` (see [Pre-processed mode](datasets.md#pre-processed-mode)), it is given in samples at the loaded sampling rate.
 
 ## Chunking strategy (online mode)
 

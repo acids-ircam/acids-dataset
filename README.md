@@ -72,6 +72,29 @@ dataset = AudioDataset("path/to/raw/audio")      # -> OnlineAudioDataset
 dataset[0] # will provide automatically the "waveform" field as a single tensor
 ```
 
+A location can be inspected without instantiating a dataset :
+
+```python
+import acids_dataset as ad
+
+ad.is_preprocessed("path/to/preprocessed")         # True for pre-processed dataset folders, False otherwise
+ad.get_channels_from_path("path/to/raw/audio")     # set of channel counts, e.g. {1, 2}
+ad.get_channels_from_path(["path/to/preprocessed", "path/to/raw/audio", "file.wav"])   # union over locations
+```
+
+`get_channels_from_path` never decodes audio : pre-processed folders give the `channels` of their metadata (or, if channels were kept at pre-processing, the shapes of one stored chunk per original file) ; raw folders are walked once, and channels are read from the `.ad` index for unchanged files and from file headers otherwise (in `n_threads` threads, 16 by default ; index files are not written). `index_dir`, `valid_exts`, `filters` and `exclude` work as for online datasets.
+
+For large raw folders, the result can be stored in a hidden `.ad_channels` file of the folder (`<folder_name>.ad_channels` in `index_dir` if given), that is read instead of scanning the folder :
+
+```python
+ad.get_channels_from_path("path/to/raw/audio", write=True)     # scans the folder, and writes .ad_channels
+ad.get_channels_from_path("path/to/raw/audio")                 # reads .ad_channels (if written with the same valid_exts, filters and exclude)
+ad.get_channels_from_path("path/to/raw/audio", force=True)     # scans the folder again (write=True to update the file)
+```
+
+The channels file is not updated when files are added or modified : use `force=True` after changing a folder. Channels files are only written for raw folders (pre-processed folders read their metadata).
+
+
 ### Online mode
 
 In online mode, audio files are parsed on the fly : there is no compilation step, and features are computed dynamically when data is loaded. Parsing parameters can be given directly, or with a [preset](#presets) (explicit arguments override the preset).
@@ -104,6 +127,22 @@ At initialization, audio files are scanned to retrieve their length, sampling ra
 | `write_index` | if `False`, do not write index files                                                       |
 
 Several dataset folders can be given, as long as they have different names. Audio files are partially loaded (only the requested chunk is decoded), resampled to `sr`, and adapted to `channels`.
+
+### Pre-processed mode
+
+Pre-processed datasets read chunks from their database : sampling rate, channels and chunk length are fixed at [pre-processing](#pre-processing). Loaded audio can still be resampled with `sr` :
+
+```python
+dataset = AudioDataset("path/to/preprocessed", sr=16000)   # pre-processed at 22050 Hz
+dataset.sr, dataset.stored_sr                               # 16000, 22050
+dataset.chunk_length                                        # in samples at 16000 Hz
+dataset.metadata["sr"], dataset.metadata["stored_sr"]       # 16000, 22050
+```
+
+- The waveform of items (and thus of loaders, `sample_features`...) is resampled when items are read ; chunks are resampled independently, with small edge effects on their first and last samples.
+- `load_audio` and `get_fragment` load context around the requested audio before resampling (as online datasets) : they match the resampled whole file, without edge effects. Lengths given in samples are at `sr`.
+- Pre-processed features are read as stored (they keep their own frame rate). Features computed by `get_fragment` on the resampled audio use the configuration of stored features : give `features=[...]` configured for `sr` if they depend on it.
+- `sr` equal to the pre-processed sampling rate (or `None`) does not resample. With a preset whose `SAMPLE_RATE` differs from the loaded sampling rate, a warning is logged.
 
 ### Loading audio from files
 
@@ -166,6 +205,34 @@ note_a_data = dataset.query_from_features(10, pitch='A', original_path=['file1.w
 
 Features available for querying are hashed in `dataset.feature_hash` (`{feature: {value: indices}}`). In online mode, only path-based features (`original_path` and `meta_regexp` features) can be used for search and partitioning, as they are known without loading audio. `index_for_features` then returns file indices, and `query_from_features` returns chunks of the matching files.
 
+## Sampling features
+
+`sample_features` loads features on random items of the dataset, e.g. to compute statistics (normalization constants, histograms) without iterating over the whole dataset :
+
+```python
+from acids_dataset.features import Peak, LoudnessMeter
+from acids_dataset.transforms import CompressRange
+
+batches = dataset.sample_features("loudness", max=50, batch_size=64)                 # list of loudness batches
+mean = dataset.sample_features("loudness", max=50, reduction=lambda b: torch.cat(b).mean())
+batches = dataset.sample_features("waveform", Peak(), CompressRange(), max_size="500M", num_workers=4)
+batches[0]["peak"], batches[0]["compressrange"]                                      # {entry: batch} for several features
+```
+
+| Argument | Effect |
+| -------- | ------ |
+| `*features` | names of recorded features (pre-processed, or computed by the dataset), `"waveform"` for audio, feature objects (computed on loaded audio batches, entry : their `feature_name`), or augmentations (`Transform`s or callables, applied to loaded audio batches, entry : their `name` or lower-cased class name) |
+| `max` | maximum number of batches (10000) |
+| `batch_size` | batch size of the inner data loader (128) |
+| `max_size` | maximum size of loaded data, in bytes or as a string (`"1G"`, `"500M"`, `"64k"`) : loading stops before exceeding it. `None` (default) for no limit |
+| `reduction` | callable called on the list of batches, whose output is returned (the list of batches otherwise) |
+| `cache` | file where batches are saved, and read from if it was written with the same features (objects are compared by class and attributes), `max`, `batch_size` and `max_size` |
+
+- Items are drawn at random, without replacement, and without the transforms of the dataset. Only requested features are loaded : online datasets only compute the requested ones.
+- Batches are tensors for a single feature, and `{entry: batch}` dicts otherwise (duplicate entries get a suffix, e.g. `peak_1`). Items that cannot be collated (e.g. whole files of different lengths) are given as lists.
+- Each object gives its own entry, computed on the loaded audio : `sample_features(Peak(), CompressRange())` gives the peak of the loaded audio, and the compressed audio. Objects are computed in the main process (on the device of features, if any), and outputs are given on CPU.
+- Other keyword arguments (`num_workers`...) are given to the `DataLoader`.
+
 ## Data loaders
 
 `get_loader` (available in both modes) returns a `torch.utils.data.DataLoader` with a random sampler (or a sequential one with `shuffle=False`). Arguments of `DataLoader` (`num_workers`, `drop_last`...) are given to the loader, other ones (`chunk_length`, `batch_by`, `pad_mode` in online mode) configure the dataset.
@@ -175,7 +242,7 @@ loader = dataset.get_loader(batch_size=16, num_workers=4, drop_last=True)
 loader = dataset.get_loader(batch_size=16, max_samples=10000, replacement=True) # fixed number of samples per epoch
 ```
 
-The chunk length of pre-processed datasets is fixed at compilation : giving a different `chunk_length` to `get_loader` raises an error.
+The chunk length of pre-processed datasets is fixed at compilation : giving a different `chunk_length` to `get_loader` raises an error. With `sr` (see [Pre-processed mode](#pre-processed-mode)), it is given in samples at the loaded sampling rate.
 
 ### Chunking strategy (online mode)
 
@@ -235,6 +302,8 @@ dataset = CombinedAudioDataset([AudioDataset("path/to/dataset1"), AudioDataset("
 dataset = AudioDataset(["path/to/preprocessed", "path/to/raw/audio"], sr=44100)    # dataset arguments are given to each dataset
 loader = dataset.get_loader(batch_size=16, chunk_length=131072)                     # loading arguments configure online datasets
 ```
+
+Dataset arguments such as `sr` are given to each dataset : `sr` resamples pre-processed datasets as well as online ones, such that items of every dataset have the same sampling rate (combined datasets do not check it otherwise).
 
 `weights` are the sampling probabilities of datasets (here, 70% of items come from the first dataset, whatever the sizes of datasets) ; without weights, items are sampled uniformly. Loading arguments (`chunk_length`, `batch_by`, `features_after_transforms`...) configure the datasets they apply to ; a `chunk_length` different from the one of a pre-processed dataset raises an error, as items could not be batched together.
 
@@ -441,7 +510,9 @@ Each descriptor is a feature (computed in pre-processing or online, and in [batc
 | | `GeneralizedCrossCorrelation` | `(P, n_frames)`, samples or seconds (or `(P, n_lags, n_frames)`) | GCC-PHAT (and other weightings) delays between pairs of channels |
 | | `Pan` | per frame, [-1, 1] | stereo position from the energies of the first two channels |
 | | `AmbisonicEncoder`, `AmbisonicDecoder` | `((N + 1)², T)`, `(L, T)` | ambisonic encoding and decoding, see [Ambisonics](#ambisonics) |
-| quality | `ClippingRatio` | per chunk | ratio of clipped samples |
+| quality | `Peak` | per chunk (per channel), linear (or dBFS) | maximum absolute amplitude |
+| | `LoudnessMeter` | per chunk, `(n_values,)`, dB / dB(A) / LUFS | statistics of frame levels, see [Loudness](#loudness) |
+| | `ClippingRatio` | per chunk | ratio of clipped samples |
 | | `DCOffset` | per chunk (per channel) | mean value |
 | | `DynamicRange` | per chunk, dB | difference between high and low percentiles of frame levels |
 | | `SilenceRatio` | per chunk | ratio of silent frames |
@@ -456,6 +527,34 @@ Per-chunk descriptors can be used for [balancing](#class-balancing) and [stratif
 ### Loudness
 
 `Loudness` gives the loudness in LUFS (per frame with `frame_length`, per channel with `keep_channels`). Values are floored to `min_loudness` (-70 LUFS by default, the absolute gate of loudness measurements), such that silence gives -70 instead of `-inf` (that would give NaN in losses) ; `min_loudness=None` keeps `-inf`.
+
+`mode` sets the measure : `"lufs"` (default, ITU-R BS.1770 ; without `keep_channels`, combined loudness of channels), `"db"` for the RMS level in dBFS, or `"dba"` for the A-weighted RMS level in dB(A) (IEC 61672, 0 dB at 1 kHz). `db` and `dba` levels use the same frames and give the same shapes as LUFS ; without `keep_channels`, they are the levels of the mix of channels. Their default names are `loudness_db` and `loudness_dba`, such that several modes can be computed together, and they are also exported by `script()`. The same measures are available as functions in `acids_dataset.utils` : `level(x, sr, mode)`, `loudness`, `rms_level`.
+
+```python
+from acids_dataset.features import Loudness
+dataset = AudioDataset("path/to/raw/audio", chunk_length=1., features=[Loudness(), Loudness(mode="dba", frame_length=2048)],
+                       output_pattern="{waveform,loudness,loudness_dba}")
+```
+
+`LoudnessMeter` gives statistics of the levels of the frames of a chunk (`frame_length`, 2048, `hop_length`), concatenated in the last dimension in the order of `properties` :
+
+| Level | Properties | Measure |
+| ----- | ---------- | ------- |
+| `db` | `min_db`, `max_db`, `db_quantiles` | RMS level, in dBFS |
+| `dba` | `min_dba`, `max_dba`, `dba_quantiles` | A-weighted RMS level, in dB(A) (IEC 61672, 0 dB at 1 kHz) |
+| `lufs` | `min_lufs`, `max_lufs`, `lufs_quantiles` | loudness, in LUFS (ITU-R BS.1770, as `Loudness`) |
+
+```python
+from acids_dataset.features import LoudnessMeter
+meter = LoudnessMeter(properties=["min_db", "max_db", "lufs_quantiles"], n_quantiles=5, sr=44100)
+meter(x)              # (..., 1 + 1 + 5)
+meter.output_names    # ["min_db", "max_db", "lufs_q0", "lufs_q0.25", "lufs_q0.5", "lufs_q0.75", "lufs_q1"]
+```
+
+- `min_*` / `max_*` give 1 value each, `*_quantiles` give `n_quantiles` values (10 by default), at probabilities evenly spaced from 0 to 1 (the first one is the minimum, the last one the maximum). `output_names` labels the values of the output.
+- Without `keep_channels`, `db` and `dba` levels are the ones of the mix of channels, and `lufs` the combined loudness of channels (BS.1770, up to 5 channels) ; with `keep_channels=True`, levels are measured on each channel, and outputs are `(..., C, n_values)`.
+- Levels of silent frames are floored to `floor_db` (-120 by default) : in LUFS, frames below the absolute gate (-70 LUFS) are silent. Silent frames are included in statistics.
+- Levels are measured on frames : they are not the integrated loudness of the chunk (given by `Loudness`).
 
 ### Spatial features
 
@@ -550,7 +649,16 @@ x = torch.randn(5, 44100)
 assert torch.allclose(decoder(encoder(x)), x, atol=1e-4)  # exact reconstruction
 ```
 
-The spherical harmonics of any directions are given by `acids_dataset.features.ambisonics.spherical_harmonics(order, azimuth, elevation)`, as an array `(n_directions, (order + 1)²)`. Encoders and decoders can also be inverted (see [Inverting features](#inverting-features)).
+The spherical harmonics of any directions are given by `acids_dataset.features.ambisonics.spherical_harmonics(order, azimuth, elevation)`, as an array `(n_directions, (order + 1)²)`. Encoders and decoders can also be inverted (see [Inverting features](#inverting-features)) : they are each other's inverse. `encoder.inverse(n_channels)` gives the `AmbisonicDecoder` (mode matching) whose loudspeakers are the directions of the input channels, and `decoder.inverse(order)` the `AmbisonicEncoder` whose sources are the loudspeakers ; `invert` uses them.
+
+```python
+encoder = AmbisonicEncoder(layout="5.0")
+decoder = encoder.inverse(5)                                  # AmbisonicDecoder(layout=<5.0 directions>, order=2, method="mode_matching")
+assert torch.allclose(encoder.invert(encoder(x)), x, atol=1e-4)
+encoder = AmbisonicDecoder(layout="cube").inverse(1)          # AmbisonicEncoder(order=1, layout=<cube directions>, strict=False)
+```
+
+Decoders often have more loudspeakers than ambisonic channels : `AmbisonicEncoder(strict=False)` then encodes channels that cannot be encoded invertibly at a fixed order (sources are mixed in ambisonic signals), instead of raising a `ValueError`.
 
 ### Inverting features
 
@@ -564,8 +672,8 @@ Invertible features (`feature.invertible`) give audio back from their outputs wi
 | `DCT` | audio, by inverse DCT and weighted overlap-add | with all coefficients (`n_coeffs=None`), and `window=None` or overlapping windows (e.g. `hop_length = frame_length // 2`) ; with hann windows, the `hop_length` first and last samples are inaccurate. Fewer coefficients low-pass frames |
 | `PQMF` | signals from sub-bands (sub-bands from signals with `inverse=True`) | near perfect reconstruction (about -60 dB) |
 | `MidSide` | left / right signals (mid / side with `inverse=True`) | always |
-| `AmbisonicEncoder` | input channels | always (encodings are invertible). The order is inferred from the number of ambisonic channels (or checked against the fixed order), and the number of channels is given by the layout ; with `layout=None`, several numbers of channels give the same order (e.g. stereo and 3 channels give order 1), and the number of channels is inferred from signals (or given with `n_channels`) |
-| `AmbisonicDecoder` | ambisonic signals | if the layout determines every component (at least `(N + 1)²` loudspeakers in independent directions, e.g. `layout=None`) ; horizontal layouts lose vertical components. The order is the fixed order, or is inferred from the number of loudspeakers (`(N + 1)²` with `layout=None` ; with a layout that can hold several orders, from signals, or given with `order`) |
+| `AmbisonicEncoder` | input channels, decoded by `inverse(C)` (an `AmbisonicDecoder` in the directions of the input channels) | always (encodings are invertible). The order is inferred from the number of ambisonic channels (or checked against the fixed order), and the number of channels is given by the layout ; with `layout=None`, several numbers of channels give the same order (e.g. stereo and 3 channels give order 1), and the number of channels is inferred from signals (or given with `n_channels`) |
+| `AmbisonicDecoder` | ambisonic signals, encoded by `inverse(order)` (an `AmbisonicEncoder` whose sources are the loudspeakers) with mode matching ; by the pseudo-inverse of the decoding matrix with `method="sampling"` (re-encoding only inverts sampling decoders on regular layouts) | if the layout determines every component (at least `(N + 1)²` loudspeakers in independent directions, e.g. `layout=None`) ; horizontal layouts lose vertical components. The order is the fixed order, or is inferred from the number of loudspeakers (`(N + 1)²` with `layout=None` ; with a layout that can hold several orders, from signals, or given with `order`) |
 
 ```python
 from acids_dataset.features import DGT, DCT, FFT
@@ -658,6 +766,25 @@ loader = dataset.get_loader(batch_size=16, features_after_transforms=False)   # 
 - Transforms of features themselves (e.g. `transforms={"loudness": normalize}`) are always applied after their computation.
 - Features of pre-processed datasets are read from the database : they describe the original audio, whatever `features_after_transforms`. Only features computed on batches (see [batch features](#batch-features)) follow it.
 - `CombinedAudioDataset(..., features_after_transforms=False)` sets every combined dataset (datasets given as objects are copied, and are not modified).
+
+### Loudness range and peak normalization
+
+`CompressRange` compresses (or expands) the loudness range of the input to `target_range` (in LUFS, or in the unit of `mode`) : the loudness of frames of `frame_duration` seconds (0.1) is mapped linearly from the input range to the target range, and the resulting gains are interpolated between frames. `NormRange` scales the input such that its peak equals `max_value`.
+
+```python
+from acids_dataset import transforms as atf
+
+atf.CompressRange(target_range=(-30, -14), sr=44100)                      # input range measured on each input
+atf.CompressRange(target_range=(-30, -14), input_range=(-60, 0), sr=44100)  # fixed input range
+atf.CompressRange(target_range=(-40, -20), mode="dba", sr=44100)            # A-weighted RMS levels, in dB(A)
+atf.NormRange(max_value=0.9)                                               # peak of every input set to 0.9
+atf.NormRange(max_value=0.9, boost=False)                                  # only inputs above 0.9 are divided
+```
+
+- `mode` sets the loudness measure, as in `Loudness` : `"lufs"` (default), `"db"` (RMS level in dBFS) or `"dba"` (A-weighted RMS level in dB(A)). `target_range`, `input_range` and `silence_db` are given in its unit ; `db` and `dba` levels are the ones of the mix of channels.
+- Without `input_range`, the input range is measured on each input (each item of a batch) : minimum and maximum loudness of its frames louder than `silence_db` (-70). Frames below the input range (resp. above) get the gain of its lower (resp. upper) bound, such that silence is not boosted more than quiet parts ; silent inputs are unchanged.
+- Gains are the same for every channel (the stereo image is kept). As they are interpolated between frames, loudness only reaches the target range on steady parts (frames next to abrupt changes may differ by 1-2 dB). With `limit=True` (default), outputs whose peak exceeds 1 are scaled down to a peak of 1.
+- `NormRange` measures the peak over channels, for each item of a batch : louder inputs are divided, and quieter ones multiplied (unless `boost=False`). Silent inputs are unchanged.
 
 For a full table of available transfroms, see at the [end](#full-augmentation-table) of `README.md`. 
 
@@ -1166,6 +1293,7 @@ dataset = AudioDataset("path/to/your/dataset", preset="rave", preset_overrides=[
 | Clip                  | `clip.gin`                  | Clips incomping signal.                                                     |
 | ClippingDistortion    | `clippingdistortion.gin`    | Adds clipping distortion.                                                   |
 | Compress              | `compress.gin`              | Compression with random parameters.                                         |
+| CompressRange         | `compressrange.gin`         | Compresses the loudness range of the signal to a target range (LUFS).       |
 | Crop                  | `crop.gin`                  | Random cropping to fixed chunk size.                                        |
 | Dequantize            | `dequantize.gin`            | Dequantize incoming signal.                                                 |
 | Derivator             | `derivator.gin`             | Derivates incoming signal.                                                  |
@@ -1182,6 +1310,7 @@ dataset = AudioDataset("path/to/your/dataset", preset="rave", preset_overrides=[
 | Mp3Compression        | `mp3compression.gin`        | Applies random mp3 compression.                                             |
 | Mute                  | `mute.gin`                  | Mutes incoming incoming signal.                                             |
 | Normalize             | `normalize.gin`             | Normalizes incoming signal.                                                 |
+| NormRange             | `normrange.gin`             | Scales the signal such that its peak equals a given value.                  |
 | PeakingFilter         | `peakingfilter.gin`         | Applies random peak filtering, superposed to data.                          |
 | PhaseMangle           | `phasemangle.gin`           | shuffle phase with an all-pass filter                                       |
 | PitchShift            | `pitchshift.gin`            | Random pitch-shifting of the signal (duration preserved).                   |

@@ -202,6 +202,57 @@ def _k_weighting_coefficients(sr: float):
     return [normalize(shelf_b, shelf_a), normalize(hp_b, hp_a)]
 
 
+LOUDNESS_MODES = ["lufs", "db", "dba"]
+
+
+def a_weighting(freqs: torch.Tensor) -> torch.Tensor:
+    """A-weighting power gains (IEC 61672, 0 dB at 1 kHz) of frequencies in Hz."""
+    f2 = freqs.square()
+    ra = (12194. ** 2) * f2.square() / ((f2 + 20.6 ** 2) * torch.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) * (f2 + 12194. ** 2))
+    return (ra * 10 ** (2. / 20)).square()
+
+
+def mean_square(frames: torch.Tensor, sample_rate: int, a_weighted: bool = False) -> torch.Tensor:
+    """mean square of signals (..., n) -> (...), A-weighted with a_weighted (computed from the weighted spectrum of
+    rectangular frames : without weighting, it equals the mean square of the signal, by Parseval's theorem)."""
+    if not a_weighted:
+        return frames.square().mean(-1)
+    n = frames.shape[-1]
+    spectrum = torch.fft.rfft(frames, dim=-1).abs().square()
+    weights = a_weighting(torch.fft.rfftfreq(n, d=1. / sample_rate).to(frames.device, frames.dtype))
+    weights[1:(n + 1) // 2] *= 2
+    return (spectrum * weights).sum(-1) / n ** 2
+
+
+def rms_level(waveform: torch.Tensor, sample_rate: int, frame_length: int | None = None, keep_channels: bool = False,
+              a_weighted: bool = False) -> torch.Tensor:
+    """RMS level in dBFS (or A-weighted, in dB(A), with a_weighted) of waveforms (..., channels, samples), with the
+    same frames and output shapes as loudness : (...), (..., num_frames) with frame_length (non-overlapping frames,
+    the last incomplete frame is discarded), (..., channels) with keep_channels, (..., channels, num_frames) with both.
+    Without keep_channels, levels are the ones of the mix (mean) of channels. Silence gives -inf."""
+    if not torch.is_tensor(waveform):
+        waveform = torch.from_numpy(waveform)
+    x = waveform
+    if frame_length is not None:
+        x = x[..., :frame_length * (x.shape[-1] // frame_length)].unfold(-1, frame_length, frame_length)
+    else:
+        x = x.unsqueeze(-2)
+    if not keep_channels:
+        x = x.mean(-3)
+    level = 10 * torch.log10(mean_square(x, sample_rate, a_weighted=a_weighted))
+    return level if frame_length is not None else level.squeeze(-1)
+
+
+def level(waveform: torch.Tensor, sample_rate: int, mode: str = "lufs", frame_length: int | None = None, keep_channels: bool = False) -> torch.Tensor:
+    """level of waveforms (..., channels, samples) : loudness in LUFS (mode="lufs", see loudness), RMS level in dBFS 
+    ("db") or A-weighted RMS level in dB(A) ("dba", see rms_level). Silence gives -inf."""
+    if mode == "lufs":
+        return loudness(waveform, sample_rate, frame_length=frame_length, keep_channels=keep_channels)
+    if mode in ["db", "dba"]:
+        return rms_level(waveform, sample_rate, frame_length=frame_length, keep_channels=keep_channels, a_weighted=mode == "dba")
+    raise ValueError("mode must be in %s, got %s"%(LOUDNESS_MODES, mode))
+
+
 def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None = None, keep_channels: bool = False):
     r"""
     Custom extension of torchaudio loudness, allowing loudness computation for small chunks.
@@ -218,7 +269,7 @@ def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None 
           default:                   (...,)
           frame_length only:         (..., num_frames)
           keep_channels only:        (..., channels)
-          frame_length+keep_channels: (..., num_frames, channels)
+          frame_length+keep_channels: (..., channels, num_frames)
     """
     if not torch.is_tensor(waveform):
         waveform = torch.from_numpy(waveform)

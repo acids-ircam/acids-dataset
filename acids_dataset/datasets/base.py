@@ -34,6 +34,162 @@ def is_preprocessed_path(path: str | Path) -> bool:
     return path.is_dir() and (path / "metadata.yaml").exists() and (path / "data.mdb").exists()
 
 
+def _channels_of_preprocessed(path: Path) -> set:
+    """channels of a pre-processed dataset : from its metadata, or (if channels were kept, i.e. None) from the waveform
+    buffer of a chunk of each original file (only buffer shapes are read)."""
+    from .. import get_metadata_from_path, get_loader_from_path
+    metadata = get_metadata_from_path(path)
+    if metadata.get('channels') is not None:
+        return {int(metadata['channels'])}
+    if not metadata.get('waveform', True):
+        raise ValueError("dataset %s was pre-processed without waveform, and without channels in its metadata"%path)
+    loader = get_loader_from_path(path)
+    channels = set()
+    for keys in loader.feature_hash['original_path'].values():
+        if len(keys) == 0: continue
+        key = keys[0]
+        key = loader.keygen.from_str(key) if isinstance(key, str) else key
+        buffer = loader[key].get_buffer('waveform')
+        channels.add(int(buffer.shape[0]) if len(buffer.shape) > 1 else 1)
+    return channels
+
+
+def _audio_files(dir_path: Path, valid_exts=None, filters=(), exclude=()) -> List[Path]:
+    """audio files of a folder (recursive), in a single walk ; filters and exclude are glob-like patterns of paths 
+    relative to the folder (as writers.utils.audio_paths_from_dir)."""
+    import os, fnmatch
+    from ..writers.utils import _VALID_EXTS
+    exts = {e.lower() for e in (valid_exts or _VALID_EXTS)}
+    files = []
+    for root, _, names in os.walk(dir_path, followlinks=True):
+        for name in names:
+            if os.path.splitext(name)[1].lower() not in exts: continue
+            rel = os.path.relpath(os.path.join(root, name), dir_path)
+            if filters and not any(fnmatch.fnmatch(rel, f) for f in filters): continue
+            if any(fnmatch.fnmatch(rel, e) for e in exclude): continue
+            files.append(Path(root) / name)
+    return files
+
+
+CHANNELS_FILE_NAME = ".ad_channels"
+CHANNELS_FILE_VERSION = 1
+
+
+def channels_file_path(dataset_path: str | Path, index_dir: str | Path | None = None) -> Path:
+    """location of the channels file of a raw audio folder (see get_channels_from_path) : ".ad_channels" in the folder, 
+    or "<folder_name>.ad_channels" in index_dir."""
+    dataset_path = Path(dataset_path).resolve()
+    if index_dir is None:
+        return dataset_path / CHANNELS_FILE_NAME
+    return Path(index_dir).resolve() / f"{dataset_path.name}{CHANNELS_FILE_NAME}"
+
+
+def get_channels_from_path(path: str | Path | List[str | Path], index_dir: str | Path | None = None, valid_exts: List[str] | None = None,
+                           filters: List[str] = [], exclude: List[str] = [], n_threads: int = 16, write: bool = False,
+                           force: bool = False) -> set:
+    """returns the set of channel counts of the audio of a dataset location, without decoding audio :
+        - pre-processed dataset folders : channels of their metadata (or, if channels were kept at pre-processing, the 
+            shapes of a stored chunk of each original file) ;
+        - raw audio folders : channels of audio files, read from the index of the folder (see OnlineAudioDataset) for 
+            unmodified files, and from file headers otherwise (in n_threads threads). Index files are not written ;
+        - audio files : channels of their header ;
+        - lists of locations : union of their channels.
+
+    For raw audio folders, the result can be written in a channels file (write=True) : a hidden ".ad_channels" file in 
+    the folder, or "<folder_name>.ad_channels" in index_dir if given. If this file exists (and was written with the same
+    valid_exts, filters and exclude), channels are read from it without scanning the folder, unless force=True. The 
+    channels file is not updated when files are added or modified : give force=True to scan the folder again.
+
+    Args:
+        path (str | Path | List[str | Path]): dataset location(s).
+        index_dir (str | Path | None, optional): index folder of raw folders (see OnlineAudioDataset). Defaults to None.
+        valid_exts (List[str] | None, optional): audio extensions of raw folders ; None for default ones. Defaults to None.
+        filters (List[str], optional): glob-like patterns of audio paths of raw folders. Defaults to [].
+        exclude (List[str], optional): glob-like patterns of excluded audio paths of raw folders. Defaults to [].
+        n_threads (int, optional): threads reading file headers. Defaults to 16.
+        write (bool, optional): write the channels of raw audio folders in their channels file. Defaults to False.
+        force (bool, optional): scan raw audio folders even if a channels file exists (and overwrite it with write). 
+            Defaults to False.
+    """
+    if isinstance(path, (list, tuple)):
+        return set().union(*[get_channels_from_path(p, index_dir=index_dir, valid_exts=valid_exts, filters=filters, 
+                                                    exclude=exclude, n_threads=n_threads, write=write, force=force) for p in path])
+    from ..utils import audio_info
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError("%s does not exist"%path)
+    if is_preprocessed_path(path):
+        return _channels_of_preprocessed(path)
+    if path.is_file():
+        return {audio_info(path)['channels']}
+    import json
+    channels_path = channels_file_path(path, index_dir)
+    scan_options = {'valid_exts': sorted(valid_exts) if valid_exts else None, 'filters': _checklist(filters), 'exclude': _checklist(exclude)}
+    if not force and channels_path.exists():
+        try:
+            with open(channels_path, "r") as f:
+                stored = json.load(f)
+            if stored.get('version') == CHANNELS_FILE_VERSION and stored.get('options') == scan_options:
+                return set(int(c) for c in stored['channels'])
+        except Exception as e:
+            logging.warning("could not read channels file %s (%s) ; scanning %s"%(channels_path, e, path))
+    channels = _scan_channels(path, index_dir, valid_exts, filters, exclude, n_threads)
+    if write:
+        try:
+            import os
+            channels_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = channels_path.with_name(channels_path.name + ".tmp")
+            with open(tmp_path, "w") as f:
+                json.dump({'version': CHANNELS_FILE_VERSION, 'dataset_path': str(path.resolve()), 'options': scan_options,
+                           'channels': sorted(channels)}, f, indent=1)
+            os.replace(tmp_path, channels_path)
+        except OSError as e:
+            logging.warning("could not write channels file %s (%s)"%(channels_path, e))
+    return channels
+
+
+def _scan_channels(path: Path, index_dir, valid_exts, filters, exclude, n_threads) -> set:
+    """channels of the audio files of a raw folder, from its index for unmodified files and from headers otherwise."""
+    from ..utils import audio_info
+    from .online import OnlineAudioDataset
+    index_path = OnlineAudioDataset.index_path_for(path, index_dir)
+    cached = {}
+    if index_path.exists():
+        try:
+            import json
+            with open(index_path, "r") as f:
+                index = json.load(f)
+            if index.get('version') == OnlineAudioDataset.index_version:
+                cached = index.get('files', {})
+        except Exception:
+            cached = {}
+    channels, to_read = set(), []
+    for audio_file in _audio_files(path, valid_exts=valid_exts, filters=_checklist(filters), exclude=_checklist(exclude)):
+        entry = cached.get(str(audio_file.relative_to(path)))
+        if entry is not None and 'channels' in entry:
+            stat = audio_file.stat()
+            if entry.get('size') == stat.st_size and entry.get('mtime') == stat.st_mtime:
+                channels.add(int(entry['channels']))
+                continue
+        to_read.append(audio_file)
+
+    def read(audio_file):
+        try:
+            return audio_info(audio_file)['channels']
+        except Exception as e:
+            logging.warning("could not read file %s : %s"%(audio_file, e))
+            return None
+    if len(to_read) > 0:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=max(1, min(n_threads, len(to_read)))) as executor:
+            channels.update(c for c in executor.map(read, to_read) if c is not None)
+    return channels
+
+
+def _checklist(x) -> list:
+    return [x] if isinstance(x, str) else list(x or [])
+
+
 def chunk_length_to_samples(chunk_length: int | float, sr: int) -> int:
     """chunk lengths follow parsers convention : int are samples, float are seconds."""
     if isinstance(chunk_length, int):
@@ -436,6 +592,151 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
             return BatchFeatureLoader(loader, processor)
         return loader
 
+    # feature sampling
+
+    @staticmethod
+    def _parse_size(size: int | float | str | None) -> int | None:
+        """parses a size in bytes, given as a number or as a string with a binary unit (e.g. "1G", "500M", "1.5GB", "64k")."""
+        if size is None or isinstance(size, (int, float)):
+            return None if size is None else int(size)
+        import re
+        result = re.match(r"^\s*([\d\.]+)\s*([kKmMgGtT]?)i?[bB]?\s*$", str(size))
+        if result is None:
+            raise ValueError("could not parse size %s (expected e.g. 1G, 500M, 64k, or a number of bytes)"%size)
+        value, unit = result.groups()
+        return int(float(value) * 1024 ** "_KMGT".index(unit.upper() or "_"))
+
+    @staticmethod
+    def _nbytes(obj) -> int:
+        """size in memory of the tensors / arrays of a (possibly nested) batch."""
+        if torch.is_tensor(obj):
+            return obj.element_size() * obj.nelement()
+        if isinstance(obj, np.ndarray):
+            return obj.nbytes
+        if isinstance(obj, dict):
+            return sum(AudioDataset._nbytes(v) for v in obj.values())
+        if isinstance(obj, (list, tuple)):
+            return sum(AudioDataset._nbytes(v) for v in obj)
+        return 0
+
+    def sample_features(self, *features: Any, max: int = 10000, batch_size: int = 128, max_size: int | str | None = None,
+                        reduction: Callable[[List[Any]], Any] | None = None, cache: str | Path | None = None, **loader_kwargs):
+        """loads given features on random items of the dataset, without the transforms of the dataset. Only requested
+        features are loaded (online datasets only compute these ones).
+
+        Args:
+            *features (str | AcidsDatasetFeature | Transform | Callable): features to sample, each giving an output entry :
+                - names (str) of recorded features (pre-processed or computed by the dataset), or "waveform" for audio ;
+                - feature objects (AcidsDatasetFeature), computed on loaded audio batches (entry : their feature_name) ;
+                - augmentations (Transform, or any callable), applied to loaded audio batches, giving augmented audio
+                    (entry : their name if any, their lower-cased class name otherwise).
+                Objects are computed in the main process, on the device of the feature if any. Batches are the entry
+                for a single feature, and {entry: batch} dicts otherwise.
+            max (int, optional): maximum number of loaded batches. Defaults to 10000.
+            batch_size (int, optional): batch size of the inner data loader. Defaults to 128.
+            max_size (int | str | None, optional): maximum size of loaded data, in bytes or as a string (e.g. "1G", "500M") ;
+                loading stops before exceeding it. None for no limit. Defaults to None.
+            reduction (Callable | None, optional): called on the list of batches, and its output returned (e.g. a mean).
+                Defaults to None (the list of batches is returned).
+            cache (str | Path | None, optional): file where loaded batches are saved ; if it exists and was written with
+                the same features, max, batch_size and max_size, batches are read from it instead of loaded. Objects are
+                compared by class and attributes. Defaults to None.
+            **loader_kwargs (Any): additional arguments of torch.utils.data.DataLoader (e.g. num_workers).
+        """
+        if len(features) == 0:
+            raise ValueError("sample_features requires at least one feature")
+        entries = self._sample_entries(features)
+        cache_key = {'features': [(name, obj if isinstance(obj, str) else self._describe(obj)) for name, obj in entries], 
+                     'max': max, 'batch_size': batch_size, 'max_size': max_size}
+        batches = None
+        if cache is not None and Path(cache).exists():
+            cached = torch.load(cache, weights_only=False)
+            if isinstance(cached, dict) and cached.get('key') == cache_key:
+                batches = cached['batches']
+            else:
+                logging.warning("cache %s was written with other parameters ; features are loaded again"%cache)
+        if batches is None:
+            batches = self._load_feature_batches(entries, max, batch_size, self._parse_size(max_size), loader_kwargs)
+            if cache is not None:
+                Path(cache).parent.mkdir(parents=True, exist_ok=True)
+                torch.save({'key': cache_key, 'batches': batches}, cache)
+        return batches if reduction is None else reduction(batches)
+
+    @staticmethod
+    def _sample_entries(features) -> List[tuple]:
+        """(entry name, feature name or object) of the arguments of sample_features ; duplicate names get a suffix."""
+        from ..features import AcidsDatasetFeature
+        entries, names = [], set()
+        for f in features:
+            if isinstance(f, str):
+                name = f
+            elif isinstance(f, AcidsDatasetFeature):
+                name = f.feature_name
+            elif callable(f):
+                name = getattr(f, "name", None) or type(f).__name__.lower()
+            else:
+                raise TypeError("sample_features takes feature names, feature objects or augmentations, got %r"%(f,))
+            base, i = name, 1
+            while name in names:
+                name, i = "%s_%d"%(base, i), i + 1
+            names.add(name)
+            entries.append((name, f))
+        return entries
+
+    @staticmethod
+    def _describe(obj) -> str:
+        """description of an object for cache keys : class, and attributes of simple types."""
+        simple = (int, float, str, bool, type(None), tuple, list)
+        attrs = {k: v for k, v in sorted(vars(obj).items()) if isinstance(v, simple)} if hasattr(obj, "__dict__") else {}
+        return "%s(%s)"%(type(obj).__name__, attrs)
+
+    @staticmethod
+    def _apply_to_batch(obj, wav):
+        """computes a feature object (or applies an augmentation) on a batch of audio (or a list of items)."""
+        from ..features import AcidsDatasetFeature
+        if isinstance(wav, list):
+            return collate_items([AudioDataset._apply_to_batch(obj, w[None])[0] for w in wav])
+        wav = torch.as_tensor(wav)
+        device = getattr(obj, "device", None)
+        if device is not None:
+            wav = wav.to(device)
+        out = obj.batch_call(wav) if isinstance(obj, AcidsDatasetFeature) else obj(wav)
+        return out.cpu() if torch.is_tensor(out) else out
+
+    def _load_feature_batches(self, entries: List[tuple], max_batches: int, batch_size: int, max_bytes: int | None,
+                              loader_kwargs: Dict[str, Any]) -> List[Any]:
+        recorded = [f for _, f in entries if isinstance(f, str)]
+        objects = [(name, f) for name, f in entries if not isinstance(f, str)]
+        # objects are computed on loaded audio
+        loaded = recorded + (["waveform"] if objects and "waveform" not in recorded else [])
+        computed = [n for n in self._computed_features() if n not in loaded]
+        dataset = self._without_features(computed)
+        dataset._set_worker_outputs("{%s}"%",".join(loaded), None)
+        n_items = min(len(dataset), max_batches * batch_size)
+        sampler = torch.randperm(len(dataset))[:n_items].tolist()
+        loader_kwargs = {'collate_fn': collate_items, **loader_kwargs}
+        if loader_kwargs.get('num_workers', 0) > 0 and loader_kwargs.get('multiprocessing_context') is None and dataset.feature_devices - {"cpu"}:
+            loader_kwargs['multiprocessing_context'] = "spawn"
+        loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, sampler=sampler, **loader_kwargs)
+        batches, total = [], 0
+        for batch in loader:
+            if isinstance(batch, list):
+                # items that cannot be collated (e.g. whole files of different lengths)
+                batch = {k: [item[k] for item in batch] for k in loaded}
+            batch = {name: batch[f] if isinstance(f, str) else self._apply_to_batch(f, batch["waveform"]) for name, f in entries}
+            batch = batch[entries[0][0]] if len(entries) == 1 else batch
+            size = self._nbytes(batch)
+            if max_bytes is not None and total + size > max_bytes:
+                logging.warning("sample_features : max_size (%d bytes) reached after %d batches"%(max_bytes, len(batches)))
+                break
+            batches.append(batch)
+            total += size
+            if len(batches) >= max_batches:
+                break
+        if len(batches) == 0:
+            raise RuntimeError("sample_features : no batch could be loaded (first batch exceeds max_size=%s bytes?)"%max_bytes)
+        return batches
+
     # batch features
 
     def _computed_features(self) -> Dict[str, Any]:
@@ -547,4 +848,4 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
         self._transforms = transforms
 
 
-__all__ = ['AudioDataset', 'is_preprocessed_path', 'TransformType']
+__all__ = ['AudioDataset', 'is_preprocessed_path', 'get_channels_from_path', 'channels_file_path', 'TransformType']

@@ -98,6 +98,18 @@ def get_feature_names_from_path(path):
 from . import writers
 from . import datasets
 
+
+def is_preprocessed(path) -> bool:
+    """returns True if path is a pre-processed dataset folder (i.e. written by preprocess_dataset), False otherwise
+    (e.g. raw audio folders, or missing paths)."""
+    return datasets.is_preprocessed_path(path)
+
+
+def get_channels_from_path(path, **kwargs) -> set:
+    """set of channel counts of the audio of a dataset location (pre-processed folder, raw audio folder, audio file, 
+    or list of them), read from metadata, index files or file headers (see datasets.get_channels_from_path)."""
+    return datasets.get_channels_from_path(path, **kwargs)
+
 from .preprocess import *
 from .update import *
 from .add_embedding import *

@@ -14,6 +14,28 @@ dataset = AudioDataset("path/to/raw/audio")      # -> OnlineAudioDataset
 dataset[0] # will provide automatically the "waveform" field as a single tensor
 ```
 
+A location can be inspected without instantiating a dataset :
+
+```python
+import acids_dataset as ad
+
+ad.is_preprocessed("path/to/preprocessed")         # True for pre-processed dataset folders, False otherwise
+ad.get_channels_from_path("path/to/raw/audio")     # set of channel counts, e.g. {1, 2}
+ad.get_channels_from_path(["path/to/preprocessed", "path/to/raw/audio", "file.wav"])   # union over locations
+```
+
+`get_channels_from_path` never decodes audio : pre-processed folders give the `channels` of their metadata (or, if channels were kept at pre-processing, the shapes of one stored chunk per original file) ; raw folders are walked once, and channels are read from the `.ad` index for unchanged files and from file headers otherwise (in `n_threads` threads, 16 by default ; index files are not written). `index_dir`, `valid_exts`, `filters` and `exclude` work as for online datasets.
+
+For large raw folders, the result can be stored in a hidden `.ad_channels` file of the folder (`<folder_name>.ad_channels` in `index_dir` if given), that is read instead of scanning the folder :
+
+```python
+ad.get_channels_from_path("path/to/raw/audio", write=True)     # scans the folder, and writes .ad_channels
+ad.get_channels_from_path("path/to/raw/audio")                 # reads .ad_channels (if written with the same valid_exts, filters and exclude)
+ad.get_channels_from_path("path/to/raw/audio", force=True)     # scans the folder again (write=True to update the file)
+```
+
+The channels file is not updated when files are added or modified : use `force=True` after changing a folder. Channels files are only written for raw folders (pre-processed folders read their metadata).
+
 ### Online mode
 
 In online mode, audio files are parsed on the fly : there is no compilation step, and features are computed dynamically when data is loaded. Parsing parameters can be given directly, or with a [preset](presets.md) (explicit arguments override the preset).
@@ -46,6 +68,22 @@ At initialization, audio files are scanned to retrieve their length, sampling ra
 | `write_index` | if `False`, do not write index files                                                       |
 
 Several dataset folders can be given, as long as they have different names. Audio files are partially loaded (only the requested chunk is decoded), resampled to `sr`, and adapted to `channels`.
+
+### Pre-processed mode
+
+Pre-processed datasets read chunks from their database : sampling rate, channels and chunk length are fixed at [pre-processing](preprocessing.md). Loaded audio can still be resampled with `sr` :
+
+```python
+dataset = AudioDataset("path/to/preprocessed", sr=16000)   # pre-processed at 22050 Hz
+dataset.sr, dataset.stored_sr                               # 16000, 22050
+dataset.chunk_length                                        # in samples at 16000 Hz
+dataset.metadata["sr"], dataset.metadata["stored_sr"]       # 16000, 22050
+```
+
+- The waveform of items (and thus of loaders, `sample_features`...) is resampled when items are read ; chunks are resampled independently, with small edge effects on their first and last samples.
+- `load_audio` and `get_fragment` load context around the requested audio before resampling (as online datasets) : they match the resampled whole file, without edge effects. Lengths given in samples are at `sr`.
+- Pre-processed features are read as stored (they keep their own frame rate). Features computed by `get_fragment` on the resampled audio use the configuration of stored features : give `features=[...]` configured for `sr` if they depend on it.
+- `sr` equal to the pre-processed sampling rate (or `None`) does not resample. With a preset whose `SAMPLE_RATE` differs from the loaded sampling rate, a warning is logged.
 
 ### Loading audio from files
 
@@ -108,6 +146,34 @@ note_a_data = dataset.query_from_features(10, pitch='A', original_path=['file1.w
 
 Features available for querying are hashed in `dataset.feature_hash` (`{feature: {value: indices}}`). In online mode, only path-based features (`original_path` and `meta_regexp` features) can be used for search and partitioning, as they are known without loading audio. `index_for_features` then returns file indices, and `query_from_features` returns chunks of the matching files.
 
+## Sampling features
+
+`sample_features` loads features on random items of the dataset, e.g. to compute statistics (normalization constants, histograms) without iterating over the whole dataset :
+
+```python
+from acids_dataset.features import Peak, LoudnessMeter
+from acids_dataset.transforms import CompressRange
+
+batches = dataset.sample_features("loudness", max=50, batch_size=64)                 # list of loudness batches
+mean = dataset.sample_features("loudness", max=50, reduction=lambda b: torch.cat(b).mean())
+batches = dataset.sample_features("waveform", Peak(), CompressRange(), max_size="500M", num_workers=4)
+batches[0]["peak"], batches[0]["compressrange"]                                      # {entry: batch} for several features
+```
+
+| Argument | Effect |
+| -------- | ------ |
+| `*features` | names of recorded features (pre-processed, or computed by the dataset), `"waveform"` for audio, feature objects (computed on loaded audio batches, entry : their `feature_name`), or augmentations (`Transform`s or callables, applied to loaded audio batches, entry : their `name` or lower-cased class name) |
+| `max` | maximum number of batches (10000) |
+| `batch_size` | batch size of the inner data loader (128) |
+| `max_size` | maximum size of loaded data, in bytes or as a string (`"1G"`, `"500M"`, `"64k"`) : loading stops before exceeding it. `None` (default) for no limit |
+| `reduction` | callable called on the list of batches, whose output is returned (the list of batches otherwise) |
+| `cache` | file where batches are saved, and read from if it was written with the same features (objects are compared by class and attributes), `max`, `batch_size` and `max_size` |
+
+- Items are drawn at random, without replacement, and without the transforms of the dataset. Only requested features are loaded : online datasets only compute the requested ones.
+- Batches are tensors for a single feature, and `{entry: batch}` dicts otherwise (duplicate entries get a suffix, e.g. `peak_1`). Items that cannot be collated (e.g. whole files of different lengths) are given as lists.
+- Each object gives its own entry, computed on the loaded audio : `sample_features(Peak(), CompressRange())` gives the peak of the loaded audio, and the compressed audio. Objects are computed in the main process (on the device of features, if any), and outputs are given on CPU.
+- Other keyword arguments (`num_workers`...) are given to the `DataLoader`.
+
 ## Multi-dataset
 
 Several datasets (pre-processed or online) can be combined with `CombinedAudioDataset`, that is an `AudioDataset` : items, slices, `files`, `load_audio`, `get_fragment`, `get_loader`, partitions and `to` work as for other datasets. Combined datasets must share the same output pattern. Datasets can be given as objects or as paths ; a list of paths that contains a pre-processed dataset given to `AudioDataset` also returns a combined dataset (a list of raw folders gives a single online dataset).
@@ -119,6 +185,8 @@ dataset = CombinedAudioDataset([AudioDataset("path/to/dataset1"), AudioDataset("
 dataset = AudioDataset(["path/to/preprocessed", "path/to/raw/audio"], sr=44100)    # dataset arguments are given to each dataset
 loader = dataset.get_loader(batch_size=16, chunk_length=131072)                     # loading arguments configure online datasets
 ```
+
+Dataset arguments such as `sr` are given to each dataset : `sr` resamples pre-processed datasets as well as online ones, such that items of every dataset have the same sampling rate (combined datasets do not check it otherwise).
 
 `weights` are the sampling probabilities of datasets (here, 70% of items come from the first dataset, whatever the sizes of datasets) ; without weights, items are sampled uniformly. Loading arguments (`chunk_length`, `batch_by`, `features_after_transforms`...) configure the datasets they apply to ; a `chunk_length` different from the one of a pre-processed dataset raises an error, as items could not be batched together.
 

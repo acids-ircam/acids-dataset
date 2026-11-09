@@ -43,6 +43,25 @@ loader = dataset.get_loader(batch_size=16, features_after_transforms=False)   # 
 - Features of pre-processed datasets are read from the database : they describe the original audio, whatever `features_after_transforms`. Only features computed on batches (see [batch features](loaders.md#batch-features)) follow it.
 - `CombinedAudioDataset(..., features_after_transforms=False)` sets every combined dataset (datasets given as objects are copied, and are not modified).
 
+## Loudness range and peak normalization
+
+`CompressRange` compresses (or expands) the loudness range of the input to `target_range` (in LUFS, or in the unit of `mode`) : the loudness of frames of `frame_duration` seconds (0.1) is mapped linearly from the input range to the target range, and the resulting gains are interpolated between frames. `NormRange` scales the input such that its peak equals `max_value`.
+
+```python
+from acids_dataset import transforms as atf
+
+atf.CompressRange(target_range=(-30, -14), sr=44100)                      # input range measured on each input
+atf.CompressRange(target_range=(-30, -14), input_range=(-60, 0), sr=44100)  # fixed input range
+atf.CompressRange(target_range=(-40, -20), mode="dba", sr=44100)            # A-weighted RMS levels, in dB(A)
+atf.NormRange(max_value=0.9)                                               # peak of every input set to 0.9
+atf.NormRange(max_value=0.9, boost=False)                                  # only inputs above 0.9 are divided
+```
+
+- `mode` sets the loudness measure, as in `Loudness` : `"lufs"` (default), `"db"` (RMS level in dBFS) or `"dba"` (A-weighted RMS level in dB(A)). `target_range`, `input_range` and `silence_db` are given in its unit ; `db` and `dba` levels are the ones of the mix of channels.
+- Without `input_range`, the input range is measured on each input (each item of a batch) : minimum and maximum loudness of its frames louder than `silence_db` (-70). Frames below the input range (resp. above) get the gain of its lower (resp. upper) bound, such that silence is not boosted more than quiet parts ; silent inputs are unchanged.
+- Gains are the same for every channel (the stereo image is kept). As they are interpolated between frames, loudness only reaches the target range on steady parts (frames next to abrupt changes may differ by 1-2 dB). With `limit=True` (default), outputs whose peak exceeds 1 are scaled down to a peak of 1.
+- `NormRange` measures the peak over channels, for each item of a batch : louder inputs are divided, and quieter ones multiplied (unless `boost=False`). Silent inputs are unchanged.
+
 For a full table of available transfroms, see at the [end](#full-augmentation-table) of `README.md`. 
 
 ## Full augmentation table
@@ -62,6 +81,7 @@ For a full table of available transfroms, see at the [end](#full-augmentation-ta
 | Clip                  | `clip.gin`                  | Clips incomping signal.                                                     |
 | ClippingDistortion    | `clippingdistortion.gin`    | Adds clipping distortion.                                                   |
 | Compress              | `compress.gin`              | Compression with random parameters.                                         |
+| CompressRange         | `compressrange.gin`         | Compresses the loudness range of the signal to a target range (LUFS).       |
 | Crop                  | `crop.gin`                  | Random cropping to fixed chunk size.                                        |
 | Dequantize            | `dequantize.gin`            | Dequantize incoming signal.                                                 |
 | Derivator             | `derivator.gin`             | Derivates incoming signal.                                                  |
@@ -78,6 +98,7 @@ For a full table of available transfroms, see at the [end](#full-augmentation-ta
 | Mp3Compression        | `mp3compression.gin`        | Applies random mp3 compression.                                             |
 | Mute                  | `mute.gin`                  | Mutes incoming incoming signal.                                             |
 | Normalize             | `normalize.gin`             | Normalizes incoming signal.                                                 |
+| NormRange             | `normrange.gin`             | Scales the signal such that its peak equals a given value.                  |
 | PeakingFilter         | `peakingfilter.gin`         | Applies random peak filtering, superposed to data.                          |
 | PhaseMangle           | `phasemangle.gin`           | shuffle phase with an all-pass filter                                       |
 | PitchShift            | `pitchshift.gin`            | Random pitch-shifting of the signal (duration preserved).                   |

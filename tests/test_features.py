@@ -1,12 +1,16 @@
 import pytest
 import torch, torchaudio
 import random
+import math
 import os
 from pathlib import Path
 import shutil
 import gin
-from . import OUT_TEST_DIR, test_name, get_feature_configs, CURRENT_TEST_DIR
-import lmdb, random
+from . import OUT_TEST_DIR, test_name, get_feature_configs, CURRENT_TEST_DIR, check_dataset_loading
+import lmdb
+import random
+import math
+from acids_dataset.writers.lmdb_writer import non_buffer_keys
 from .datasets import get_available_datasets, get_dataset
 
 import acids_dataset as ad
@@ -15,6 +19,7 @@ from acids_dataset.datasets import AudioDataset
 from acids_dataset.utils import set_gin_constant, feature_from_gin_config
 from acids_dataset.writers import LMDBWriter, read_metadata
 from acids_dataset.features import Mel, Loudness, AfterMIDI, BeatTrack, hash_from_clustering
+from acids_dataset.features.pitch import F0
 
 from tests.module_tests import *
 
@@ -29,7 +34,8 @@ def init_gin_constants():
 @pytest.mark.parametrize('config', ['default.gin'])
 @pytest.mark.parametrize("dataset", get_available_datasets())
 @pytest.mark.parametrize('feature_path,feature_config', get_feature_configs('mel'))
-def test_mel(config, feature_path, feature_config, dataset, test_name, test_k=10):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_mel(config, feature_path, feature_config, dataset, waveform, test_name, test_k=10):
     init_gin_constants()
     gin.add_config_file_search_path(feature_path)
     gin.parse_config_file(config)
@@ -45,17 +51,18 @@ def test_mel(config, feature_path, feature_config, dataset, test_name, test_k=10
     out = mel_feature(torch.zeros(1, 1, 16384))
 
     # build dataset
-    writer = LMDBWriter(dataset_path, dataset_out, features=[mel_feature])
+    writer = LMDBWriter(dataset_path, dataset_out, features=[mel_feature], waveform=waveform)
     writer.build()
+    check_dataset_loading(dataset_out, waveform, features=[mel_feature.feature_name])
 
-    env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     mel_key = list(read_metadata(dataset_out)['features'].keys())[0]
 
     dataset = AudioDataset(str(dataset_out))
     random_keys = random.choices(dataset.keys, k=test_k)
     for key in random_keys:
-        dataset.get(key, "waveform")
+        if waveform:
+            dataset.get(key, "waveform")
         dataset.get(key, mel_key)
 
 
@@ -63,7 +70,8 @@ def test_mel(config, feature_path, feature_config, dataset, test_name, test_k=10
 @pytest.mark.parametrize("dataset", get_available_datasets())
 @pytest.mark.parametrize("keep_channels", [True, False])
 @pytest.mark.parametrize("frame_length", [None, 1024])
-def test_loudness(config,  dataset, test_name, keep_channels, frame_length, test_k=10):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_loudness(config,  dataset, test_name, keep_channels, frame_length, waveform, test_k=10):
     init_gin_constants()
     gin.parse_config_file(config)
 
@@ -77,18 +85,22 @@ def test_loudness(config,  dataset, test_name, keep_channels, frame_length, test
     out = loudness_feature(torch.zeros(1, 1, 16384))
 
     # build dataset
-    writer = LMDBWriter(dataset_path, dataset_out, features=[loudness_feature])
+    writer = LMDBWriter(dataset_path, dataset_out, features=[loudness_feature], waveform=waveform)
     writer.build()
+    check_dataset_loading(dataset_out, waveform, features=[loudness_feature.feature_name])
 
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
             ae = fragment_class(txn.get(key))
-            audio = ae.get_audio("waveform")
+            assert ae.has_buffer("waveform") == waveform
+            if waveform:
+                audio = ae.get_audio("waveform")
             loudness = ae.get_array("loudness")
             if keep_channels: 
                 if frame_length:
@@ -100,13 +112,15 @@ def test_loudness(config,  dataset, test_name, keep_channels, frame_length, test
                     assert loudness.ndim == 1
                 else:
                     assert loudness.ndim == 0
-    
-        
+    env.close()
 
+        
+    
 @pytest.mark.parametrize('config', ['default.gin'])
 @pytest.mark.parametrize("dataset", get_available_datasets())
 @pytest.mark.parametrize('feature_path,feature_config', get_feature_configs('midi'))
-def test_after_midi(config, dataset, feature_path, feature_config, test_name, test_k=10):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_after_midi(config, dataset, feature_path, feature_config, waveform, test_name, test_k=10):
     init_gin_constants()
     gin.add_config_file_search_path(feature_path)
     set_gin_constant('SAMPLE_RATE', 44100)
@@ -124,25 +138,31 @@ def test_after_midi(config, dataset, feature_path, feature_config, test_name, te
     out = mel_feature(torch.zeros(1, 1, 16384))
 
     # build dataset
-    writer = LMDBWriter(dataset_path, dataset_out, features=[mel_feature])
+    writer = LMDBWriter(dataset_path, dataset_out, features=[mel_feature], waveform=waveform)
     writer.build()
+    check_dataset_loading(dataset_out, waveform, features=[mel_feature.feature_name])
 
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
             ae = fragment_class(txn.get(key))
-            audio = ae.get_audio("waveform")
+            assert ae.has_buffer("waveform") == waveform
+            if waveform:
+                audio = ae.get_audio("waveform")
             midi = ae.get_data("midi")
-    
+    env.close()
         
+    
 @pytest.mark.parametrize('config', ['default.gin'])
 @pytest.mark.parametrize("dataset", ['simple'])
 @pytest.mark.parametrize('feature_path,feature_config', get_feature_configs('module'))
-def test_module(config, dataset, feature_path, feature_config, test_name, test_k=10):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_module(config, dataset, feature_path, feature_config, waveform, test_name, test_k=10):
     init_gin_constants()
     if feature_config == "moduleembedding.gin": 
         pytest.skip(reason="moduleembedding.gin not valid for testing")
@@ -161,10 +181,10 @@ def test_module(config, dataset, feature_path, feature_config, test_name, test_k
     out = module_feature[0](torch.zeros(1, 1, 131072))
 
     # # build dataset
-    writer = LMDBWriter(dataset_path, dataset_out, features=module_feature)
+    writer = LMDBWriter(dataset_path, dataset_out, features=module_feature, waveform=waveform)
     writer.build()
+    check_dataset_loading(dataset_out, waveform, features=[f.feature_name for f in module_feature])
 
-    env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     loader = AudioDataset(str(dataset_out))
     random_keys = random.choices(loader.keys, k=test_k)
     for r in random_keys:
@@ -175,7 +195,8 @@ def test_module(config, dataset, feature_path, feature_config, test_name, test_k
 @pytest.mark.parametrize('config', ['default.gin'])
 @pytest.mark.parametrize("dataset", ['simple'])
 @pytest.mark.parametrize('feature_path,feature_config', get_feature_configs('mel'))
-def test_feature_clustering(config, dataset, feature_path, feature_config, test_name, n_clusters = 3, test_k=10):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_feature_clustering(config, dataset, feature_path, feature_config, waveform, test_name, n_clusters = 3, test_k=10):
     init_gin_constants()
     gin.add_config_file_search_path(feature_path)
     gin.parse_config_file(config)
@@ -190,11 +211,15 @@ def test_feature_clustering(config, dataset, feature_path, feature_config, test_
     mel_feature = Mel()
 
     # build dataset
-    writer = LMDBWriter(dataset_path, dataset_out, features=[mel_feature])
+    writer = LMDBWriter(dataset_path, dataset_out, features=[mel_feature], waveform=waveform)
     writer.build()
+    check_dataset_loading(dataset_out, waveform, features=[mel_feature.feature_name])
 
     # hash from cluster
-    dataset = AudioDataset(dataset_out, required_fields=['waveform', mel_feature.feature_name])
+    required_fields = ['waveform', mel_feature.feature_name] if waveform else [mel_feature.feature_name]
+    # without waveform, only features can be loaded
+    output_pattern = "waveform" if waveform else mel_feature.feature_name
+    dataset = AudioDataset(dataset_out, required_fields=required_fields, output_pattern=output_pattern)
     kmeans = hash_from_clustering(dataset, mel_feature.feature_name, n_clusters, pca_target_dim=0, write=True, verbose=True)
     
     for cluster_idx in range(n_clusters):
@@ -214,7 +239,8 @@ def make_sin_dataset(target_dir, n_examples, duration = 4.0, fs=44100):
 @pytest.mark.parametrize("pitch_method", _AD_F0_METHODS)
 @pytest.mark.parametrize("frame_length", [None, 1024, 2048])
 @pytest.mark.parametrize("hop_length", [None, 1024, 2048])
-def test_pitch_features(pitch_method, test_name, frame_length, hop_length, n_examples = 20): 
+@pytest.mark.parametrize("waveform", [True, False])
+def test_pitch_features(pitch_method, test_name, frame_length, hop_length, waveform, n_examples = 20): 
     init_gin_constants()
     ad.features.RAISE_EXC_IF_FEATURE_ERROR = True
 
@@ -244,15 +270,18 @@ def test_pitch_features(pitch_method, test_name, frame_length, hop_length, n_exa
                 assert out.shape[-1] == x.unfold(-1, frame_length or f[0].default_frame_length, hop_length or f[0].default_frame_length).shape[-2]
 
     dataset_out = OUT_TEST_DIR / "compiled" / test_name 
-    writer = LMDBWriter(dataset_dir, dataset_out, features=feature_list, force=True)
+    writer = LMDBWriter(dataset_dir, dataset_out, features=feature_list, force=True, waveform=waveform)
     writer.build()
+    check_dataset_loading(dataset_out, waveform, features=[f.feature_name for f in feature_list])
 
     
 @pytest.mark.parametrize('config', ['default.gin'])
 @pytest.mark.parametrize("dataset", ['simple'])
 @pytest.mark.parametrize("module", [ConvEmbedding()])
 @pytest.mark.parametrize('feature_path,feature_config', get_feature_configs('beattrack'))
-def test_beat_tracking(config, dataset, module, feature_path, feature_config, test_name, test_k=10):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_beat_tracking(config, dataset, module, feature_path, feature_config, waveform, test_name, test_k=10):
+    init_gin_constants()
     set_gin_constant('SAMPLE_RATE', 44100)
     set_gin_constant('DEVICE', "cpu")
     set_gin_constant('CHANNELS', 1)
@@ -269,17 +298,73 @@ def test_beat_tracking(config, dataset, module, feature_path, feature_config, te
     out = beat_feature(torch.randn(1, 1, 441000))
 
     # # build dataset
-    writer = LMDBWriter(dataset_path, dataset_out, features=[beat_feature])
+    writer = LMDBWriter(dataset_path, dataset_out, features=[beat_feature], waveform=waveform)
     writer.build()
+    check_dataset_loading(dataset_out, waveform, features=[beat_feature.feature_name])
 
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
             ae = fragment_class(txn.get(key))
-            audio = ae.get_audio("waveform")
+            assert ae.has_buffer("waveform") == waveform
+            if waveform:
+                audio = ae.get_audio("waveform")
             beat_clock = ae.get_array(beat_feature.feature_name)
+    env.close()
 
+
+
+@pytest.mark.parametrize("mode", ["yin", "pyin"])
+@pytest.mark.parametrize("frame_length,hop_length", [(512, 512), (512, 128), (2048, 1024), (None, None)])
+def test_pitch_frame_length(mode, frame_length, hop_length):
+    # frames too short for fmin are analyzed with a larger window, without changing output framing
+    sr = 44100
+    f0_feature = F0(mode=mode, sr=sr, fmin="C2", fmax="C7", frame_length=frame_length, hop_length=hop_length)
+    x = 0.5 * torch.sin(2 * torch.pi * 440 * torch.arange(sr) / sr)[None, None]
+    out = f0_feature(x)
+    assert out.shape[-1] == x.unfold(-1, frame_length or F0.default_frame_length, hop_length or F0.default_frame_length).shape[-2]
+    f0 = out[..., 0, :] if mode == "pyin" else out
+    assert abs(float(f0[f0 > 0].median()) - 440) < 440 * 0.02
+
+
+@pytest.mark.parametrize("mode", ["yin", "pyin"])
+@pytest.mark.parametrize("n_samples", [0, 1, 100, 2047])
+def test_pitch_short_inputs(mode, n_samples):
+    # inputs shorter than a frame are padded to a frame
+    sr = 44100
+    f0_feature = F0(mode=mode, sr=sr, frame_length=2048, hop_length=512)
+    x = 0.5 * torch.sin(2 * torch.pi * 440 * torch.arange(n_samples) / sr)[None, None]
+    out = f0_feature(x)
+    assert out.shape[-1] == 1
+    assert torch.all(torch.isfinite(out))
+    # pitch is preserved for inputs longer than ~2 periods
+    if n_samples >= 2047:
+        f0 = out[..., 0, :] if mode == "pyin" else out
+        assert abs(float(f0.flatten()[0]) - 440) < 440 * 0.02
+
+
+@pytest.mark.parametrize("n_samples", [88200, 131072, 100000])
+@pytest.mark.parametrize("keep_channels", [False, True])
+def test_loudness_frames(n_samples, keep_channels):
+    # chunks that are not a multiple of frame_length discard their last incomplete frame, as the scripted version
+    from acids_dataset.features.loudness import LoudnessScript
+    x = 0.1 * torch.randn(2, 2, n_samples)
+    feature = Loudness(frame_length=512, sr=44100, keep_channels=keep_channels)
+    out = feature(x)
+    assert out.shape[-1] == n_samples // 512
+    scripted = LoudnessScript(frame_length=512, sr=44100, keep_channels=keep_channels)(x)
+    assert out.shape == scripted.shape and torch.allclose(out, scripted, atol=1e-3)
+
+
+@pytest.mark.parametrize("gain", [2., 4., 0.25])
+def test_loudness_gain(gain):
+    # loudness follows gains exactly, also for loud signals (K-weighting filters must not clip)
+    from acids_dataset.utils import loudness
+    g = torch.Generator().manual_seed(0)
+    x = 0.2 * torch.randn(2, 22050, generator=g)
+    assert abs(float(loudness(gain * x, 22050) - loudness(x, 22050)) - 20 * math.log10(gain)) < 1e-3

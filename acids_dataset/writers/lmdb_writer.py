@@ -1,4 +1,5 @@
 import os
+import contextlib
 import subprocess
 import pdb
 import tempfile
@@ -10,7 +11,6 @@ import shutil
 import lmdb
 import tqdm
 from pathlib import Path
-from . import RAISE_EXC_IF_WRITER_ERROR
 from .utils import audio_paths_from_dir, FeatureHash, KeyIterator, StatusBytes, status_bytes, checklist
 from .. import get_fragment_class, get_parser_class_from_path, get_metadata_from_path, get_fragment_class_from_path
 from ..utils import get_folder_size
@@ -91,7 +91,7 @@ class LMDBWriter(object):
         if isinstance(fragment_class, str): fragment_class = get_fragment_class(fragment_class)
         self.fragment_class = fragment_class
         self.features = features or []
-        self.metadata = {'filters': filters, 'exclude': exclude, 'max_db_size': self.max_db_size}
+        self.metadata = {'filters': filters, 'exclude': exclude, 'max_db_size': self.max_db_size, 'waveform': waveform}
         self.waveform = waveform
         self.log = log
         if check:
@@ -211,7 +211,9 @@ class LMDBWriter(object):
                           feature_status,
                           key_generator, 
                           fragment_class, 
-                          dataset_path):
+                          dataset_path, 
+                          waveform: bool = True, 
+                          skipped_files: List[str] | None = None):
         n_seconds = 0
         current_file = parser.audio_path
         for load_fn in parser:
@@ -224,16 +226,25 @@ class LMDBWriter(object):
                     n_seconds += float(fragment.get_metadata().get('length', '0'))
                     feature_hash['original_path'][str(current_file)].append(current_key)
                     cls._extract_features(fragment, features, current_key, feature_hash, feature_status, dataset_path)
+                    # waveform is needed for feature extraction, but is removed before writing if waveform=False
+                    if not waveform:
+                        fragment.delete_buffer('waveform')
                     txn.put(
                         current_key.encode(), 
                         fragment.serialize()
                     )
                     feature_status['waveform'].push(fragment.has_buffer('waveform'))
             except FileNotReadException as e: 
+                # read at runtime, such that it can be modified after import
+                from . import RAISE_EXC_IF_WRITER_ERROR
                 if RAISE_EXC_IF_WRITER_ERROR: 
-                   raise e
-                else:
-                   pass
+                    raise e
+                logging.warning("could not read file %s ; skipping (%s)"%(e.file, e.exception))
+                if skipped_files is not None:
+                    skipped_file = Path(e.file)
+                    if skipped_file.is_absolute() and skipped_file.is_relative_to(dataset_path.resolve().parent):
+                        skipped_file = skipped_file.relative_to(dataset_path.resolve().parent)
+                    skipped_files.append(str(skipped_file))
         return n_seconds
 
     @classmethod
@@ -254,6 +265,7 @@ class LMDBWriter(object):
         """Builds the pre-processed database."""
         n_seconds = 0
         metadata = {}
+        skipped_files = []
         feature_hash = self._init_feature_hash()
         feature_status = self._init_feature_status(self.features)
         key_generator = iter(KeyIterator())
@@ -261,10 +273,10 @@ class LMDBWriter(object):
         with env.begin(write=True) as txn:
             for i, current_file in tqdm.tqdm(enumerate(self._files), total=len(self._files)):
                 dataset_path = self._retrieve_basedir_from_path(current_file)
-                parser = self.parser(current_file, features=self.features, dataset_path = dataset_path, waveform=self.waveform) 
+                parser = self.parser(current_file, features=self.features, dataset_path = dataset_path, waveform=True) 
                 if len(metadata) == 0:
                     metadata = self._update_metadata(parser.get_metadata(), metadata)
-                parsed_time = self._add_file_to_lmdb(txn, parser, self.features, feature_hash, feature_status, key_generator, self.fragment_class, dataset_path)
+                parsed_time = self._add_file_to_lmdb(txn, parser, self.features, feature_hash, feature_status, key_generator, self.fragment_class, dataset_path, waveform=self.waveform, skipped_files=skipped_files)
                 n_seconds += parsed_time
                 if self.log: 
                     pid = os.getpid()
@@ -292,6 +304,7 @@ class LMDBWriter(object):
             yaml.safe_dump({
                 "n_seconds": n_seconds,
                 "n_chunks": n_chunks,
+                "skipped_files": skipped_files,
                 "writer_class": type(self).__name__,
                 "fragment_class": self.fragment_class.__name__, 
                 "features": {self.get_feature_name(f): str(f) for f in self.features},
@@ -383,6 +396,7 @@ class LMDBWriter(object):
         metadata = get_metadata_from_path(path)
         n_chunks = metadata['n_chunks']
         n_seconds = metadata['n_seconds']
+        skipped_files = list(metadata.get('skipped_files') or [])
 
         # check
         if check:
@@ -478,10 +492,11 @@ class LMDBWriter(object):
                         parser = parser_class(current_file, 
                                               features=features, 
                                               dataset_path = data_path)
-                        parsed_time = cls._add_file_to_lmdb(txn, parser, features, feature_hash, feature_status, key_generator, fragment_class, data_path)
+                        # datasets built without the waveform flag in metadata stored waveforms
+                        parsed_time = cls._add_file_to_lmdb(txn, parser, features, feature_hash, feature_status, key_generator, fragment_class, data_path, waveform=metadata.get('waveform', True), skipped_files=skipped_files)
                         n_seconds += parsed_time
                 n_chunks = key_generator.current_idx
-            metadata.update(n_seconds=n_seconds, n_chunks=n_chunks, features={cls.get_feature_name(f): str(f) for f in features})
+            metadata.update(n_seconds=n_seconds, n_chunks=n_chunks, features={cls.get_feature_name(f): str(f) for f in features}, skipped_files=skipped_files)
 
             cls._add_feature_hash_to_lmdb(txn, feature_hash)
             cls._add_features_to_lmdb(txn, features)
@@ -608,28 +623,35 @@ class LMDBLoader(object):
     def features(self): 
         return self._features
 
+    @contextlib.contextmanager
+    def _read_txn(self, txn=None):
+        """yields txn if given, or a read transaction on the database."""
+        if txn is not None:
+            yield txn
+            return
+        env = lmdb.open(str(self._db_path), readonly=True, lock=False)
+        try:
+            with env.begin(write=False) as transaction:
+                yield transaction
+        finally:
+            env.close()
+
     def get_feature_hash(self, txn=None):
-        transaction = txn or self.database.begin()
-        feature_hash = dill.loads(transaction.get('feature_hash'.encode('utf-8'))) 
-        if txn is None: transaction.__exit__()
-        return feature_hash
+        with self._read_txn(txn) as transaction:
+            return dill.loads(transaction.get('feature_hash'.encode('utf-8'))) 
 
     def get_features(self, txn=None):
-        transaction = txn or self.database.begin()
-        features = dill.loads(transaction.get('features'.encode('utf-8'))) 
-        if txn is None: transaction.__exit__()
-        return features 
+        with self._read_txn(txn) as transaction:
+            return dill.loads(transaction.get('features'.encode('utf-8'))) 
 
     def iter_fragment_keys(self, as_bytes=True, txn=None):
-        transaction = txn or self.database.begin()
         non_keys = list(map(self._keygen.from_str, non_buffer_keys))
-        for key in transaction.cursor().iternext(values=False):
-            if key not in non_keys:
-                if as_bytes:
-                    yield key
-                else:
-                    yield self._keygen.to_str(key)
-        if txn is None: transaction.__exit__()
+        # keys are read before being yielded, such that the database is closed while iterating (fragments can then 
+        # be read in the loop : recent versions of lmdb do not open a database twice in a process)
+        with self._read_txn(txn) as transaction:
+            keys = [key for key in transaction.cursor().iternext(values=False) if key not in non_keys]
+        for key in keys:
+            yield key if as_bytes else self._keygen.to_str(key)
             
     def iter_fragments(self, txn: lmdb.Environment | None = None) -> Tuple[str, AudioFragment]:
         """iter_fragments can be used to iterate contained fragments.
@@ -640,13 +662,11 @@ class LMDBLoader(object):
         Yields:
             : key, fragment (Tuple[str, AcidsFragment]): key and fragments
         """
-        transaction = txn or self.database.begin()
         non_keys = list(map(self._keygen.from_str, non_buffer_keys))
-        with self.database.begin(readonly=True) as txn:
-            for key in txn.cursor().iternext(values=False):
+        with self._read_txn(txn) as transaction:
+            for key in transaction.cursor().iternext(values=False):
                 if key not in non_keys:
-                    yield key, self._fragment_class(txn.get(key))
-        if txn is None: transaction.__exit__()
+                    yield key, self._fragment_class(transaction.get(key))
 
     def parse_from_path(self, path):
         """parse_from_path direcly returns the iterator, and the feature hash, from a given database.

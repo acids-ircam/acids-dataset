@@ -1,22 +1,16 @@
+include 'default.gin'
+
 CHUNK_LENGTH = 524288
 HOP_LENGTH = 262144
 SAMPLE_RATE = 44100
 CHANNELS = 1
 
 RawParser:
-    chunk_length = 524288
-    hop_length = 262144
-    sr = %SAMPLE_RATE
-    channels = %CHANNELS 
     pad_mode = "discard"
     loudness_threshold = -60
 
-LMDBWriter:
-    fragment_class = @AcidsFragment
-    parser = @RawParser
-    
-#parse_features:
-#   features = [@features.AfterMIDI]
-#   device = %DEVICE
-    
+OnlineAudioDataset:
+    loudness_threshold = -60
 
+#features.parse_features:
+#   features = [@features.AfterMIDI]

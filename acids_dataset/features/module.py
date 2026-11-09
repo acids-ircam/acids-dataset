@@ -37,6 +37,7 @@ class ModuleEmbedding(AcidsDatasetFeature):
         super().__init__(name=name, **kwargs)
         self.sr = sr
         self.retain_module = retain_module
+        self._module_path = None if module_path is None else str(module_path)
         self._init_module(module, module_path, module_sr, method, method_args, method_kwargs, self.device)
         self._init_transforms(transforms, batch_transforms)
 
@@ -61,10 +62,31 @@ class ModuleEmbedding(AcidsDatasetFeature):
         return self._transforms
 
     def __getstate__(self):
-        statedict = super().__getstate__()
+        # copy : the state of the feature itself must not be modified
+        # object.__getstate__ exists since Python 3.11
+        statedict = dict(super().__getstate__()) if hasattr(super(), "__getstate__") else dict(self.__dict__)
         if not self.retain_module and "_module" in statedict: 
             del statedict['_module']
         return statedict
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        # modules loaded from a path (e.g. TorchScript, that cannot be pickled) are reloaded on demand (e.g. in data loader workers)
+        if "_module" not in self.__dict__:
+            self._module = None
+
+    def _ensure_module(self):
+        if getattr(self, "_module", None) is None and getattr(self, "_module_path", None) is not None:
+            self._load_module_from_path(self._module_path)
+            self._module = self._module.to(self.device or "cpu")
+            self._module.eval()
+
+    def to(self, device=None):
+        """moves the feature (and its module) to device."""
+        super().to(device)
+        if getattr(self, "_module", None) is not None:
+            self._module = self._module.to(self.device)
+        return self
 
     def _init_module(self, module=None, module_path=None, module_sr=None, method="forward", method_args=tuple(), method_kwargs=dict(), device='cpu'):
         if isinstance(device, str): device = torch.device(device)
@@ -123,6 +145,7 @@ class ModuleEmbedding(AcidsDatasetFeature):
         return np.stack(audios, 0)
 
     def _process_audio(self, audio):
+        self._ensure_module()
         with torch.set_grad_enabled(False):
             audio = torch.from_numpy(self._get_transforms(audio)).to(torch.get_default_dtype())
             audio = audio.to(self.device)
@@ -136,8 +159,9 @@ class ModuleEmbedding(AcidsDatasetFeature):
         return out
 
     def from_fragment(self, fragment, write: bool = True):
+        self._ensure_module()
         if self._module is None: 
-            raise RuntimeError('ModuleEmbedding has no _module. If coming from pickling, set retain_module kwargs to True when saving feature in the database.')
+            raise RuntimeError('ModuleEmbedding has no _module. If coming from pickling, set retain_module kwargs to True when saving feature in the database, or load the module from module_path.')
         audio = self._audio_from_fragment(fragment)
         out = self._process_audio(audio).cpu().numpy()
         if write: 
@@ -146,4 +170,21 @@ class ModuleEmbedding(AcidsDatasetFeature):
 
     def __call__(self, x):
         return self._process_audio(x).to(x)
+
+    @property
+    def supports_batch(self):
+        # transforms are applied item by item
+        return len(self._transforms) == 0
+
+    def batch_call(self, x: torch.Tensor) -> torch.Tensor:
+        """embeddings of a batch (batch, channels, samples), as extracted for each item : (batch, 1 + n_transforms, ...)."""
+        self._ensure_module()
+        if self._module_sr is not None and self.sr is not None and self.sr != self._module_sr:
+            x = resample(x, self.sr, self._module_sr)
+        if not self.supports_batch:
+            return torch.stack([self._process_audio(x[i]).to(x.device) for i in range(x.shape[0])])
+        with torch.set_grad_enabled(False):
+            out = getattr(self._module, self._method)(x.to(self.device).to(torch.get_default_dtype()), *self._method_args, **self._method_kwargs)
+        # as __call__, outputs are given on the device of inputs
+        return out.unsqueeze(1).to(x.device)
         

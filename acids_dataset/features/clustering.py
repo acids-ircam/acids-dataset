@@ -34,7 +34,7 @@ def hash_from_clustering(dataset, feature, n_centroids, pca_target_dim=None, pca
     for i in range(len(dataset)):
         data = dataset.get(i, output_pattern=feature).flatten()
         if isinstance(data, torch.Tensor): data = data.numpy()
-        k = kmeans.predict(data[None])
+        k = kmeans.predict(data[None])[0]
         feature_hash[int(k)].append(dataset.keys[i])
 
     if write: 

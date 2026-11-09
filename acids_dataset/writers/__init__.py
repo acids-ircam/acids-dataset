@@ -1,6 +1,7 @@
 import os, gin
 
-RAISE_EXC_IF_WRITER_ERROR = bool(os.environ.get('ACIDSTRANSFORMS_RAISE_EXC_IF_WRITER_ERROR', True))
+# if False (default), files that cannot be read are skipped (and listed in dataset metadata) instead of stopping parsing
+RAISE_EXC_IF_WRITER_ERROR = os.environ.get('ACIDSTRANSFORMS_RAISE_EXC_IF_WRITER_ERROR', '0').lower() in ['1', 'true', 'yes']
 
 from .utils import *
 from .lmdb_writer import LMDBWriter, LMDBLoader

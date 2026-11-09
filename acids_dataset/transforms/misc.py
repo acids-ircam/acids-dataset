@@ -86,7 +86,7 @@ class Stretch(Transform):
 
     def apply_random(self, x):
         if random.random() < self.p:
-            return self.__call__(x)
+            return self.apply(x)
         else:
             return x
 
@@ -443,3 +443,133 @@ class AddNoise(Transform):
         self.std = std
     def apply(self, x):
         return x + torch.randn_like(x) * 1.e-5
+
+
+def _leading_flatten(x: torch.Tensor):
+    """(..., C, T) -> (B, C, T), with the leading shape (1-d inputs are a single channel)."""
+    if x.ndim == 1:
+        return x[None, None], x.shape
+    return x.reshape((-1,) + x.shape[-2:]), x.shape
+
+
+@gin.configurable(module="transforms")
+class CompressRange(Transform):
+    """compresses (or expands) the loudness range of the input to target_range : the loudness of frames of
+    frame_duration seconds is mapped linearly from input_range to target_range, and the resulting gain is interpolated
+    between frames. Frames below input_range (resp. above) get the gain of its lower (resp. upper) bound, such that
+    silence is not boosted more than quiet parts. Gains are the same for every channel (stereo image is kept).
+
+    Loudness is measured in LUFS (mode="lufs", ITU-R BS.1770), as the RMS level in dBFS ("db"), or as the A-weighted
+    RMS level in dB(A) ("dba", IEC 61672) : ranges and silence_db are given in this unit. db and dba levels are the ones
+    of the mix of channels.
+
+    Args:
+        target_range (Tuple[float, float]): target loudness range. Defaults to (-30, -14).
+        input_range (Tuple[float, float] | None): loudness range of inputs ; if None, it is measured on each input,
+            as the minimum and maximum loudness of its frames louder than silence_db. Defaults to None.
+        frame_duration (float): duration of loudness frames (seconds). Defaults to 0.1.
+        silence_db (float): frames quieter than this loudness are ignored when measuring the input range. Defaults to -70.
+        limit (bool): if the output peak exceeds 1, the output is scaled down to a peak of 1. Defaults to True.
+        mode (str): loudness measure ("lufs", "db" or "dba"). Defaults to "lufs".
+        sr (int): sampling rate. Defaults to 44100.
+    """
+    takes_as_input = Transform.input_types.torch
+
+    def __init__(self, target_range: Tuple[float, float] = (-30., -14.), input_range: Tuple[float, float] | None = None,
+                 frame_duration: float = 0.1, silence_db: float = -70., limit: bool = True, mode: str = "lufs", sr: int = 44100, **kwargs):
+        super().__init__(sr=sr, **kwargs)
+        from ..utils import LOUDNESS_MODES
+        if mode not in LOUDNESS_MODES:
+            raise ValueError("mode must be in %s, got %s"%(LOUDNESS_MODES, mode))
+        self.mode = mode
+        self.target_range = self._check_range(target_range, "target_range")
+        self.input_range = None if input_range is None else self._check_range(input_range, "input_range")
+        self.frame_duration = frame_duration
+        self.silence_db = silence_db
+        self.limit = limit
+
+    @staticmethod
+    def _check_range(r, name):
+        lo, hi = map(float, r)
+        if lo > hi:
+            raise ValueError("%s must be (low, high), got %s"%(name, r))
+        return (lo, hi)
+
+    def _frame_loudness(self, x: torch.Tensor, frame_length: int) -> torch.Tensor:
+        """(B, C, T) -> loudness of frames (B, n_frames) ; the last frame is zero-padded."""
+        from ..utils import level
+        n_frames = max(1, math.ceil(x.shape[-1] / frame_length))
+        x = torch.nn.functional.pad(x, (0, n_frames * frame_length - x.shape[-1]))
+        return level(x, self.sr, mode=getattr(self, "mode", "lufs"), frame_length=frame_length)
+
+    def frame_gains(self, x: torch.Tensor) -> torch.Tensor:
+        """gains (dB) of the frames of inputs (B, C, T), as (B, n_frames)."""
+        frame_length = max(1, int(round(self.frame_duration * self.sr)))
+        frame_db = self._frame_loudness(x, frame_length)
+        active = torch.isfinite(frame_db) & (frame_db > self.silence_db)
+        if self.input_range is not None:
+            lo_in = torch.full(frame_db.shape[:1], self.input_range[0], dtype=x.dtype, device=x.device)
+            hi_in = torch.full_like(lo_in, self.input_range[1])
+        else:
+            lo_in = torch.where(active, frame_db, torch.full_like(frame_db, float("inf"))).amin(-1)
+            hi_in = torch.where(active, frame_db, torch.full_like(frame_db, -float("inf"))).amax(-1)
+        lo_t, hi_t = self.target_range
+        in_width = hi_in - lo_in
+        ratio = torch.where(in_width > 1e-6, (hi_t - lo_t) / in_width.clamp(min=1e-6), torch.zeros_like(in_width))
+        mid_in, mid_t = (lo_in + hi_in) / 2, (lo_t + hi_t) / 2
+        # frames out of the input range (and silent frames) get the gains of the range bounds
+        level = torch.minimum(torch.maximum(torch.nan_to_num(frame_db, neginf=-1e3), lo_in[:, None]), hi_in[:, None])
+        gains = mid_t + (level - mid_in[:, None]) * ratio[:, None] - level
+        # inputs without active frames are unchanged
+        has_active = active.any(-1) if self.input_range is None else torch.ones_like(active.any(-1))
+        return torch.where(has_active[:, None], gains, torch.zeros_like(gains))
+
+    def apply(self, x: torch.Tensor):
+        x_flat, shape = _leading_flatten(x)
+        x_flat = x_flat.float()
+        gains = self.frame_gains(x_flat)
+        frame_length = max(1, int(round(self.frame_duration * self.sr)))
+        # gains are given at frame centers, and linearly interpolated between them
+        n_frames, T = gains.shape[-1], x_flat.shape[-1]
+        centers = (torch.arange(n_frames, dtype=x_flat.dtype, device=x_flat.device) + 0.5) * frame_length
+        t = torch.arange(T, dtype=x_flat.dtype, device=x_flat.device)
+        idx = torch.searchsorted(centers, t).clamp(1, max(1, n_frames - 1)) if n_frames > 1 else torch.zeros(T, dtype=torch.long, device=x_flat.device)
+        if n_frames > 1:
+            c0, c1 = centers[idx - 1], centers[idx]
+            w = ((t - c0) / (c1 - c0)).clamp(0, 1)
+            gain_db = gains[:, idx - 1] * (1 - w) + gains[:, idx] * w
+        else:
+            gain_db = gains[:, :1].expand(-1, T)
+        out = x_flat * torch.pow(10., gain_db / 20)[:, None, :]
+        if self.limit:
+            peak = out.abs().amax(dim=(-2, -1), keepdim=True)
+            out = torch.where(peak > 1, out / peak.clamp(min=1e-10), out)
+        return out.reshape(shape)
+
+
+@gin.configurable(module="transforms")
+class NormRange(Transform):
+    """scales the input such that its peak (maximum absolute amplitude, over channels) equals max_value : louder inputs
+    are divided, quieter ones multiplied (only louder ones if boost is False). Each item of a batch is scaled
+    independently ; silent inputs are unchanged.
+
+    Args:
+        max_value (float): target peak. Defaults to 1.
+        boost (bool): also scale up inputs whose peak is below max_value. Defaults to True.
+    """
+    takes_as_input = Transform.input_types.torch
+
+    def __init__(self, max_value: float = 1., boost: bool = True, **kwargs):
+        super().__init__(**kwargs)
+        if max_value <= 0:
+            raise ValueError("max_value must be positive, got %s"%max_value)
+        self.max_value = float(max_value)
+        self.boost = boost
+
+    def apply(self, x: torch.Tensor):
+        x_flat, shape = _leading_flatten(x)
+        peak = x_flat.abs().amax(dim=(-2, -1), keepdim=True)
+        scale = torch.where(peak > 1e-10, self.max_value / peak.clamp(min=1e-10), torch.ones_like(peak))
+        if not self.boost:
+            scale = scale.clamp(max=1.)
+        return (x_flat * scale).reshape(shape)

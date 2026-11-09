@@ -101,6 +101,9 @@ class AudioFragment(object):
         if buffer.unpickler != b'':
             unpickler = dill.loads(buffer.unpickler)
             return unpickler(buffer.data)
+        elif getattr(self, "PRECISION_TO_DTYPE", {}).get(buffer.precision) in ["int32", "int64"]:
+            # audio is only stored as int16 or float ; other integer buffers are feature arrays
+            return self.get_array(key)
         else:
             return self.get_audio(key)
 
@@ -266,6 +269,10 @@ class AudioFragment(object):
 
     def has_buffer(self, name):
         return name in self.ae.buffers
+
+    def delete_buffer(self, name):
+        if name in self.ae.buffers:
+            del self.ae.buffers[name]
 
     def has_metadata(self, name):
         return name in dict_from_buffer(self.ae.buffers["metadata"])

@@ -1,18 +1,13 @@
-CHUNK_LENGTH=262144
-HOP_LENGTH=131072
+include 'default.gin'
+
+CHUNK_LENGTH = 262144
+HOP_LENGTH = 131072
 SAMPLE_RATE = 44100
 CHANNELS = 1
 
 RawParser:
-    chunk_length = %CHUNK_LENGTH
-    hop_length = %HOP_LENGTH
-    sr = %SAMPLE_RATE
-    channels = %CHANNELS 
     pad_mode = "zero"
     discard_if_lower_than = 32000
 
-LMDBWriter:
-    fragment_class = @AcidsFragment
-    parser = @RawParser
-    
-
+OnlineAudioDataset:
+    pad_mode = "zero"

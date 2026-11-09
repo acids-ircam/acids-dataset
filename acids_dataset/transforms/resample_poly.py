@@ -16,7 +16,9 @@ def _output_len(len_h, in_len, up, down):
 
 def upfirdn(h, x, up=1, down=1):
     x_up = torch.nn.functional.interpolate(x, scale_factor=up, mode="linear")
-    x_filtered = torch.nn.functional.conv1d(x_up, h.reshape(1, 1, h.shape[0]))
+    # fft convolution (equal to conv1d, i.e. correlation with h) : direct convolution of long upsampled signals with long
+    # filters takes several GB on CPU
+    x_filtered = torchaudio.functional.fftconvolve(x_up, h.flip(0).reshape((1,) * (x_up.ndim - 1) + (-1,)).to(x_up), mode="valid")
     x_down = torch.nn.functional.interpolate(x_filtered, scale_factor=1 / down, mode="linear")
     return x_down
 

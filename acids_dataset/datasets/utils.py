@@ -12,7 +12,42 @@ fragment_interfaces = {
     "buffer": 'get_buffer',
     None: 'get'}
 
-def _from_fragment(fragment, item):
+def is_multi_index(index) -> bool:
+    """returns True for indices selecting several items (slices, sequences or 1-d arrays of integers)."""
+    if isinstance(index, slice):
+        return True
+    if isinstance(index, (list, tuple)):
+        return True
+    if torch.is_tensor(index) or hasattr(index, "__array__"):
+        return getattr(index, "ndim", 0) > 0
+    return False
+
+def multi_index_to_list(index, length: int) -> list:
+    """converts a multi index to a list of indices."""
+    if isinstance(index, slice):
+        return list(range(*index.indices(length)))
+    if torch.is_tensor(index):
+        index = index.tolist()
+    elif hasattr(index, "__array__"):
+        import numpy as np
+        index = np.asarray(index).tolist()
+    return list(index)
+
+def collate_items(items: list):
+    """collates items as a batch (as torch DataLoader), or returns them as a list if they cannot be collated."""
+    if len(items) == 0:
+        return []
+    try:
+        return torch.utils.data.default_collate(items)
+    except (RuntimeError, TypeError):
+        return items
+
+def _from_fragment(fragment, item, index=None):
+    # index of the item in the dataset (e.g. to record losses of items, see acids_dataset.sampling.LossTracker)
+    if item == "index":
+        if index is None:
+            raise KeyError("index is not available")
+        return torch.tensor(index)
     item = item.split(':')
     if len(item) == 1:
         item, method_type = item[0], None
@@ -22,13 +57,13 @@ def _from_fragment(fragment, item):
         raise ValueError('invalid item found : %s'%item)
     return getattr(fragment, fragment_interfaces[method_type])(item)
 
-def _outs_from_pattern(fragment, output_pattern):
+def _outs_from_pattern(fragment, output_pattern, index=None):
     re_result = re.match(r'^(\w+)$', output_pattern)
     if re_result is not None:
-        return _from_fragment(fragment, output_pattern)
+        return _from_fragment(fragment, output_pattern, index=index)
     re_result = re.match(r'^\(?([\w\,\: \[\]\d]+)\)?$', output_pattern)
     if re_result is not None:
-        items = list(filter(lambda x: x != "", re_result.groups()[0].split(',')))
+        items = list(filter(lambda x: x != "", map(str.strip, re_result.groups()[0].split(','))))
         item_parsed = []
         for i in items:
             entry = i
@@ -41,14 +76,14 @@ def _outs_from_pattern(fragment, output_pattern):
                     subidx = int(subidx)
             else:
                 subidx = None
-            out = _from_fragment(fragment, entry.replace(" ", ""))
+            out = _from_fragment(fragment, entry.replace(" ", ""), index=index)
             if subidx is not None: 
                 out = out[subidx]
             item_parsed.append(out)
         return tuple(item_parsed)
     re_result = re.match(r'^\{([\w\,\: \[\]\d\-\>]+)\}$', output_pattern)
     if re_result is not None:
-        items = list(filter(lambda x: x != "", re_result.groups()[0].split(',')))
+        items = list(filter(lambda x: x != "", map(str.strip, re_result.groups()[0].split(','))))
         items_parsed = {}
         for i in items:
             entry = i
@@ -57,7 +92,7 @@ def _outs_from_pattern(fragment, output_pattern):
             
             if ('->' in i):
                 if len(i.split('->')) == 2:
-                    entry, alias = i.split('->')
+                    entry, alias = map(str.strip, i.split('->'))
                 else:
                     raise ValueError('output_pattern %s is wrong: only one alias (aka ->) is supported'%output_pattern)
             re_result = re.match(r"^(\S+)\[([\d\:]+)\]$", entry)
@@ -69,7 +104,7 @@ def _outs_from_pattern(fragment, output_pattern):
                     subidx = int(subidx)
             else:
                 subidx = None
-            out = _from_fragment(fragment, entry.replace(" ", ""))
+            out = _from_fragment(fragment, entry.replace(" ", ""), index=index)
             if subidx is not None: 
                 out = out[subidx]
             items_parsed[alias] = out
@@ -77,6 +112,9 @@ def _outs_from_pattern(fragment, output_pattern):
     raise ValueError('Could not parse output_pattern : %s'%output_pattern)
 
 def _check_channels(out, n_channels = None):
+    # scalars (e.g. loudness of a chunk) have no channels
+    if not hasattr(out, "ndim") or out.ndim == 0:
+        return out
     if out.ndim == 1: 
         out = out.unsqueeze(0)
     if n_channels is None: 

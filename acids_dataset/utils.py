@@ -36,6 +36,68 @@ def get_backend(backend: str):
 def load_file(file_path):
     return torchaudio.load(file_path)
 
+def audio_info(file_path):
+    """returns header information (sr, channels, n_frames, duration, codec) without decoding the file. 
+    Uses soundfile (exact frame counts), and torchcodec for formats unsupported by libsndfile."""
+    file_path = str(file_path)
+    try:
+        import soundfile as sf
+        info = sf.info(file_path)
+        return {
+            'sr': int(info.samplerate), 
+            'channels': int(info.channels),
+            'n_frames': int(info.frames), 
+            'duration': float(info.frames / info.samplerate),
+            'codec': info.subtype,
+            'backend': 'soundfile'
+        }
+    except Exception as sf_exception:
+        try:
+            from torchcodec.decoders import AudioDecoder
+        except ImportError:
+            raise sf_exception
+        metadata = AudioDecoder(file_path).metadata
+        duration = metadata.duration_seconds_from_header or metadata.duration_seconds
+        return {
+            'sr': int(metadata.sample_rate), 
+            'channels': int(metadata.num_channels), 
+            'n_frames': int(round(duration * metadata.sample_rate)),
+            'duration': float(duration),
+            'codec': metadata.codec,
+            'backend': 'torchcodec'
+        }
+
+def load_audio_range(file_path, frame_offset: int = 0, num_frames: int = -1, backend: str | None = None):
+    """loads num_frames samples of a file starting at frame_offset (in original sampling rate) without 
+    decoding the whole file. Returns a (channels, time) float32 tensor and the sampling rate.
+
+    backend can be "soundfile" (sample-accurate seeking), "torchcodec" (FFmpeg-based seeking, for 
+    formats unsupported by libsndfile), or None to try soundfile first."""
+    file_path = str(file_path)
+    if backend in [None, "soundfile"]:
+        try:
+            import soundfile as sf
+            with sf.SoundFile(file_path) as f:
+                sr = f.samplerate
+                f.seek(min(frame_offset, f.frames))
+                data = f.read(num_frames, dtype="float32", always_2d=True)
+            return torch.from_numpy(data.T.copy()), sr
+        except Exception as e:
+            if backend == "soundfile": raise e
+    from torchcodec.decoders import AudioDecoder
+    decoder = AudioDecoder(file_path)
+    sr = decoder.metadata.sample_rate
+    start = frame_offset / sr
+    stop = None if num_frames < 0 else (frame_offset + num_frames) / sr
+    samples = decoder.get_samples_played_in_range(start, stop)
+    data = samples.data
+    # first decoded frame may start slightly before the requested position
+    offset = max(0, round((start - samples.pts_seconds) * sr))
+    data = data[..., offset:]
+    if num_frames >= 0:
+        data = data[..., :num_frames]
+    return data.float(), sr
+
 
 def copy_for_gin_config_copy(obj):
     if isinstance(obj, list):
@@ -119,6 +181,78 @@ class GinEnv(object):
         gin.config.__dict__.update(self._dict)
 
 
+def _k_weighting_coefficients(sr: float):
+    """(b, a) coefficients of the two biquads of K-weighting (ITU-R BS.1770) : high shelf (+4 dB at 1500 Hz) and 
+    high-pass (38 Hz), as in torchaudio treble_biquad and highpass_biquad."""
+    gain, cf, Q = 4.0, 1500.0, 1.0 / math.sqrt(2.0)
+    w0 = 2.0 * math.pi * cf / sr
+    A = 10.0 ** (gain / 40.0)
+    alpha = math.sin(w0) / (2.0 * Q)
+    shelf_b = [A * ((A + 1) + (A - 1) * math.cos(w0) + 2.0 * math.sqrt(A) * alpha), 
+               -2.0 * A * ((A - 1) + (A + 1) * math.cos(w0)), 
+               A * ((A + 1) + (A - 1) * math.cos(w0) - 2.0 * math.sqrt(A) * alpha)]
+    shelf_a = [(A + 1) - (A - 1) * math.cos(w0) + 2.0 * math.sqrt(A) * alpha, 
+               2.0 * ((A - 1) - (A + 1) * math.cos(w0)), 
+               (A + 1) - (A - 1) * math.cos(w0) - 2.0 * math.sqrt(A) * alpha]
+    w0 = 2.0 * math.pi * 38.0 / sr
+    alpha = math.sin(w0) / (2.0 * 0.5)
+    hp_b = [(1.0 + math.cos(w0)) / 2.0, -(1.0 + math.cos(w0)), (1.0 + math.cos(w0)) / 2.0]
+    hp_a = [1.0 + alpha, -2.0 * math.cos(w0), 1.0 - alpha]
+    normalize = lambda b, a: ([x / a[0] for x in b], [x / a[0] for x in a])
+    return [normalize(shelf_b, shelf_a), normalize(hp_b, hp_a)]
+
+
+LOUDNESS_MODES = ["lufs", "db", "dba"]
+
+
+def a_weighting(freqs: torch.Tensor) -> torch.Tensor:
+    """A-weighting power gains (IEC 61672, 0 dB at 1 kHz) of frequencies in Hz."""
+    f2 = freqs.square()
+    ra = (12194. ** 2) * f2.square() / ((f2 + 20.6 ** 2) * torch.sqrt((f2 + 107.7 ** 2) * (f2 + 737.9 ** 2)) * (f2 + 12194. ** 2))
+    return (ra * 10 ** (2. / 20)).square()
+
+
+def mean_square(frames: torch.Tensor, sample_rate: int, a_weighted: bool = False) -> torch.Tensor:
+    """mean square of signals (..., n) -> (...), A-weighted with a_weighted (computed from the weighted spectrum of
+    rectangular frames : without weighting, it equals the mean square of the signal, by Parseval's theorem)."""
+    if not a_weighted:
+        return frames.square().mean(-1)
+    n = frames.shape[-1]
+    spectrum = torch.fft.rfft(frames, dim=-1).abs().square()
+    weights = a_weighting(torch.fft.rfftfreq(n, d=1. / sample_rate).to(frames.device, frames.dtype))
+    weights[1:(n + 1) // 2] *= 2
+    return (spectrum * weights).sum(-1) / n ** 2
+
+
+def rms_level(waveform: torch.Tensor, sample_rate: int, frame_length: int | None = None, keep_channels: bool = False,
+              a_weighted: bool = False) -> torch.Tensor:
+    """RMS level in dBFS (or A-weighted, in dB(A), with a_weighted) of waveforms (..., channels, samples), with the
+    same frames and output shapes as loudness : (...), (..., num_frames) with frame_length (non-overlapping frames,
+    the last incomplete frame is discarded), (..., channels) with keep_channels, (..., channels, num_frames) with both.
+    Without keep_channels, levels are the ones of the mix (mean) of channels. Silence gives -inf."""
+    if not torch.is_tensor(waveform):
+        waveform = torch.from_numpy(waveform)
+    x = waveform
+    if frame_length is not None:
+        x = x[..., :frame_length * (x.shape[-1] // frame_length)].unfold(-1, frame_length, frame_length)
+    else:
+        x = x.unsqueeze(-2)
+    if not keep_channels:
+        x = x.mean(-3)
+    level = 10 * torch.log10(mean_square(x, sample_rate, a_weighted=a_weighted))
+    return level if frame_length is not None else level.squeeze(-1)
+
+
+def level(waveform: torch.Tensor, sample_rate: int, mode: str = "lufs", frame_length: int | None = None, keep_channels: bool = False) -> torch.Tensor:
+    """level of waveforms (..., channels, samples) : loudness in LUFS (mode="lufs", see loudness), RMS level in dBFS 
+    ("db") or A-weighted RMS level in dB(A) ("dba", see rms_level). Silence gives -inf."""
+    if mode == "lufs":
+        return loudness(waveform, sample_rate, frame_length=frame_length, keep_channels=keep_channels)
+    if mode in ["db", "dba"]:
+        return rms_level(waveform, sample_rate, frame_length=frame_length, keep_channels=keep_channels, a_weighted=mode == "dba")
+    raise ValueError("mode must be in %s, got %s"%(LOUDNESS_MODES, mode))
+
+
 def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None = None, keep_channels: bool = False):
     r"""
     Custom extension of torchaudio loudness, allowing loudness computation for small chunks.
@@ -127,7 +261,7 @@ def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None 
         waveform: input tensor of shape (..., channels, samples)
         sample_rate: sample rate
         frame_length: if given, split audio into non-overlapping frames of this length (in samples),
-                      padding the last frame if needed, and return per-frame loudness
+                      discarding the last incomplete frame, and return per-frame loudness
         keep_channels: if True, compute loudness per channel instead of combined LUFS
 
     Returns:
@@ -135,7 +269,7 @@ def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None 
           default:                   (...,)
           frame_length only:         (..., num_frames)
           keep_channels only:        (..., channels)
-          frame_length+keep_channels: (..., num_frames, channels)
+          frame_length+keep_channels: (..., channels, num_frames)
     """
     if not torch.is_tensor(waveform):
         waveform = torch.from_numpy(waveform)
@@ -148,11 +282,12 @@ def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None 
     T = waveform.size(-1)
     B = math.prod(batch_shape)  # 1 when there are no batch dims
 
-    # --- Frame splitting: pad to multiple of frame_length, unfold into frames ---
+    # --- Frame splitting: crop to multiple of frame_length, unfold into frames ---
     if frame_length is not None:
         remainder = T % frame_length
         if remainder != 0:
-            waveform = waveform[..., math.floor(waveform.shape[-1] / frame_length)]
+            # last incomplete frame is discarded (as in features.loudness.LoudnessScript)
+            waveform = waveform[..., :frame_length * (T // frame_length)]
         # (..., C, T) -> (..., C, num_frames, frame_length)
         waveform = waveform.unfold(-1, frame_length, frame_length)
         num_frames = waveform.size(-2)
@@ -167,8 +302,10 @@ def loudness(waveform: torch.Tensor, sample_rate: int, frame_length: int | None 
         waveform = waveform.reshape(B, C, T)
 
     # --- K-weighting ---
-    waveform = torchaudio.functional.treble_biquad(waveform, sample_rate, 4.0, 1500.0, 1 / math.sqrt(2))
-    waveform = torchaudio.functional.highpass_biquad(waveform, sample_rate, 38.0, 0.5)
+    # filtered without clamping (torchaudio biquads clamp outputs to [-1, 1], that biases the loudness of loud signals)
+    for b, a in _k_weighting_coefficients(sample_rate):
+        waveform = torchaudio.functional.lfilter(waveform, torch.tensor(a, dtype=waveform.dtype, device=waveform.device), 
+                                                 torch.tensor(b, dtype=waveform.dtype, device=waveform.device), clamp=False)
 
     gate_duration = min(0.4, waveform.size(-1) / sample_rate)
     overlap = 0.75
@@ -306,17 +443,31 @@ def get_available_cuda_device():
     return torch.device('cuda')
 
 
+def env_flag(name: str, default: bool) -> bool:
+    """boolean value of an environment variable ("0", "false", "no", "off" and "" are False), default if not set."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 def get_default_accelerated_device():
-    cuda_available = os.environ.get('USE_CUDA', True) and torch.cuda.is_available()
-    if cuda_available:
-        if os.environ.get('CUDA_AVAILABLE_DEVICES'):
-            get_available_cuda_device()
-        else:
-            return torch.device('cuda')
-    mps_available = os.environ.get('USE_MPS', False) and torch.mps.is_available()
-    if mps_available: 
+    """accelerated device used with device="auto" : CUDA if available (unless USE_CUDA=0), MPS if available and 
+    USE_MPS=1, and CPU otherwise. CUDA devices can be selected with CUDA_VISIBLE_DEVICES."""
+    if env_flag('USE_CUDA', True) and torch.cuda.is_available():
+        return get_available_cuda_device()
+    if env_flag('USE_MPS', False) and torch.backends.mps.is_available():
         return torch.device('mps')
     return torch.device('cpu')
+
+
+def resolve_device(device=None) -> torch.device:
+    """device of features : CPU if None, the default accelerated device if "auto" (see get_default_accelerated_device)."""
+    if device is None:
+        return torch.device('cpu')
+    if isinstance(device, str) and device == "auto":
+        return get_default_accelerated_device()
+    return torch.device(device)
 
 def get_accelerated_device(accelerator = None):
     if accelerator == "cpu":
@@ -356,6 +507,11 @@ def pad(
                 return None
         else: 
             raise TypeError('got type %s for discard_if_lower_than'%type(discard_if_lower_than))
+    # degenerate chunks : nothing to repeat for empty chunks, and repeat / reflect cannot grow single samples
+    if chunk.shape[-1] == 0:
+        pad_mode = PadMode.ZERO
+    elif chunk.shape[-1] == 1 and pad_mode in [PadMode.REPEAT, PadMode.REFLECT]:
+        pad_mode = PadMode.REPLICATE
     if pad_mode == PadMode.ZERO:
         return torch.nn.functional.pad(chunk, (0, target_size - chunk.shape[-1]), mode="constant", value=0.)
     elif pad_mode == PadMode.REPEAT:
@@ -453,7 +609,7 @@ def frame_with_pad(x: torch.Tensor, frame_length: int, hop_size: int) -> torch.T
 
 def match_loudness(signal, target_signal, sr):
     if signal.ndim == 3: 
-        return torch.stack(0, map(match_loudness, signal))
+        return torch.stack([match_loudness(s, t, sr) for s, t in zip(signal, target_signal)])
     current_loudness = torchaudio.functional.loudness(signal, sr)
     target_loudness = torchaudio.functional.loudness(target_signal, sr)
     return torchaudio.functional.gain(signal, target_loudness - current_loudness)
@@ -473,7 +629,12 @@ def get_subclasses_from_package(package, filter_class, exclude = []):
         if mod.__name__ in exclude: pass
         for name, obj in inspect.getmembers(mod):
             if isinstance(obj, type):
-                if issubclass(obj, filter_class) and (obj not in transform_list):
+                # generic aliases (e.g. list[int]) are instances of type in Python 3.10, but not classes
+                try:
+                    is_subclass = issubclass(obj, filter_class)
+                except TypeError:
+                    continue
+                if is_subclass and (obj not in transform_list):
                     transform_list.append(obj)
     return transform_list
 

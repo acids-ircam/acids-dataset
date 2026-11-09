@@ -34,6 +34,17 @@ def build_audiomentation_wrapper(cls):
                 aug_kwargs['sample_rate'] = kwargs.get('sr')
             self._obj = self.obj_class(*args, p=p, **aug_kwargs)
 
+        def __call__(self, *args, _force_transform: bool = False, **kwargs):
+            # probabilities are handled by audiomentations objects : forced transforms temporarily set it to 1
+            if not _force_transform or not hasattr(self._obj, "p"):
+                return super().__call__(*args, **kwargs)
+            p = self._obj.p
+            self._obj.p = 1.
+            try:
+                return super().__call__(*args, **kwargs)
+            finally:
+                self._obj.p = p
+
         def get_class_fullname(): 
             return cls.__name__
             
@@ -62,7 +73,8 @@ def build_audiomentation_wrapper(cls):
 
         def _apply_obj(self, x):
             out = self._obj(x, sample_rate=self.sr)
-            if -1 in map(lambda x: x / abs(x), out.strides):
+            # reversed views (negative strides) cannot be converted to tensors
+            if any(s < 0 for s in out.strides):
                 out = np.ascontiguousarray(out)
             return out
 

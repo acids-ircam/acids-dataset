@@ -29,9 +29,26 @@ def get_feature_configs(feature_name):
     return configs
 
 def get_available_features():
-    feature_path = Path(__file__).parent / ".." / "acids_dataset" / "configs" / "features" 
+    feature_path = Path(__file__).parent / ".." / "acids_dataset" / "configs" / "features"
     features = filter(lambda x: os.path.splitext(x)[1] == ".gin", os.listdir(feature_path))
     return [feature_path / f for f in features]
 
-
-
+def check_dataset_loading(dataset_out, waveform, features=[], test_k=1):
+    """checks that waveform is stored in the database only if waveform=True, and that computed 
+    features can be loaded. If waveform=False, only features are loaded."""
+    import random
+    from acids_dataset.datasets import AudioDataset
+    dataset = AudioDataset(str(dataset_out))
+    feature_status = dataset.loader.feature_status
+    if feature_status is not None and "waveform" in feature_status:
+        assert feature_status["waveform"].count() == (len(dataset) if waveform else 0)
+    metadata = dataset.metadata
+    chunk_length_smp = int(float(metadata['chunk_length']) * int(metadata['sr']))
+    for idx in random.choices(range(len(dataset)), k=test_k):
+        assert dataset.loader[idx].has_buffer("waveform") == waveform
+        if waveform:
+            audio = dataset.get(idx, output_pattern="waveform")
+            assert audio.shape[-1] == chunk_length_smp
+        for f in features:
+            dataset.get(idx, output_pattern=f)
+    return dataset

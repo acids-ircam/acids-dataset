@@ -45,7 +45,16 @@ class Mel(AcidsDatasetFeature):
             fragment.put_array(self.feature_name, mels)
         return mels
 
+    supports_batch = True
+
+    def to(self, device=None):
+        super().to(device)
+        self.mel_spectrogram = self.mel_spectrogram.to(self.device)
+        return self
+
     def __call__(self, x):
+        if torch.is_tensor(x) and next(iter(self.mel_spectrogram.buffers())).device != x.device:
+            self.mel_spectrogram = self.mel_spectrogram.to(x.device)
         return self.mel_spectrogram(x)
         
 

@@ -42,7 +42,8 @@ class TransformInput(Enum):
 default_cast_table = {
     (TransformInput.numpy, TransformInput.numpy): lambda x: x,
     (TransformInput.numpy, TransformInput.torch): lambda x: torch.from_numpy(x).float(),
-    (TransformInput.torch, TransformInput.numpy): lambda x: x.numpy(), 
+    # tensors may be on accelerators (e.g. batches on GPU)
+    (TransformInput.torch, TransformInput.numpy): lambda x: x.detach().cpu().numpy(), 
     (TransformInput.torch, TransformInput.torch): lambda x: x
 }
 
@@ -138,6 +139,9 @@ class Transform():
         if isinstance(output, list):
             return [self.cast_table[(self.type_hash(output[i]), self.type_hash(input[i]))](output[i]) for i in range(len(output))]
         out = self.cast_table[(self.type_hash(output), self.type_hash(input))](output)
+        # outputs are given back on the device of inputs
+        if torch.is_tensor(out) and torch.is_tensor(input) and out.device != input.device:
+            out = out.to(input.device)
         if self.type_hash(out) == self.input_types.torch:
             out = out.to(input)
         return out
@@ -173,14 +177,16 @@ class Transform():
 
 @gin.configurable(module="transforms")
 class Compose(UserList):
-    def __init__(self, *transforms: List[Transform]):
-        """Compose sequentially applies conteined transforms. Subclass of UserLit, such that most methods like append, extend, 
-        etc, are handled. 
+    def __init__(self, *args: Transform, transforms: List[Transform] | None = None):
+        """Compose sequentially applies conteined transforms. Subclass of UserLit, such that most methods like append, extend,
+        etc, are handled.
 
         Args:
-            transform_list (List[Transform]): list of transforms to apply.
+            *args (Transform): transforms to apply.
+            transforms (List[Transform], optional): transforms to apply after *args (keyword form, used by gin configs).
         """
-        for i, t in enumerate(transforms): 
+        transforms = list(args) + list(transforms or [])
+        for i, t in enumerate(transforms):
             assert isinstance(t, Transform), "got wrong type for transform #%d : %s"%(i, type(t))
         super().__init__(transforms)
 

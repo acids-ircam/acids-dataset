@@ -1,0 +1,13 @@
+include 'default.gin'
+
+CHUNK_LENGTH = 262144
+HOP_LENGTH = 131072
+SAMPLE_RATE = 44100
+CHANNELS = 1
+
+RawParser:
+    pad_mode = "zero"
+    discard_if_lower_than = 32000
+
+OnlineAudioDataset:
+    pad_mode = "zero"

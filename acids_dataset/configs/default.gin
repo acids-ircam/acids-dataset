@@ -1,4 +1,13 @@
+# default preset : base bindings for pre-processing (RawParser, LMDBWriter) and online datasets (OnlineAudioDataset).
+# Other presets include it, and redefine the following values (that are overridden by user arguments).
 
+SAMPLE_RATE = 44100
+CHANNELS = None         # None to keep original channels
+CHUNK_LENGTH = None     # in samples (int) or seconds (float) ; must be given for pre-processing
+HOP_LENGTH = None       # None for CHUNK_LENGTH (pre-processing only)
+DEVICE = "cpu"
+
+# pre-processing
 RawParser:
     chunk_length = %CHUNK_LENGTH
     hop_length = %HOP_LENGTH
@@ -9,5 +18,13 @@ RawParser:
 LMDBWriter:
     fragment_class = @AcidsFragment
     parser = @RawParser
-    
 
+# online datasets
+OnlineAudioDataset:
+    sr = %SAMPLE_RATE
+    channels = %CHANNELS
+    chunk_length = %CHUNK_LENGTH
+
+# features computed in both modes, e.g. 
+# features.parse_features:
+#     features = [@features.Loudness]

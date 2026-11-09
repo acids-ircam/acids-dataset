@@ -2,13 +2,14 @@ import os, sys
 import gin
 import random
 import lmdb
+from acids_dataset.writers.lmdb_writer import non_buffer_keys
 import shutil
 import torch
 import torchaudio
 import pytest
 import gin
 
-from . import OUT_TEST_DIR, test_name
+from . import OUT_TEST_DIR, test_name, check_dataset_loading
 from pathlib import Path
 from acids_dataset.writers import audio_paths_from_dir, LMDBWriter, read_metadata
 from acids_dataset.parsers import raw_parser as raw
@@ -76,7 +77,8 @@ def test_raw_parser(dataset, test_name, parser, import_backend, pad_mode, chunk_
             
 @pytest.mark.parametrize('config', ['rave.gin'])
 @pytest.mark.parametrize("dataset", get_available_datasets())
-def test_build_dataset(config, dataset, test_name, test_k = 1):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_build_dataset(config, dataset, waveform, test_name, test_k = 1):
     # test writing
     set_gin_constant('SAMPLE_RATE', 44100)
     set_gin_constant('CHANNELS', 1)
@@ -85,24 +87,29 @@ def test_build_dataset(config, dataset, test_name, test_k = 1):
     dataset_out = OUT_TEST_DIR / "compiled" / test_name
     if dataset_out.exists():
         shutil.rmtree(dataset_out.resolve())
-    writer = LMDBWriter(dataset_path, dataset_out)
+    writer = LMDBWriter(dataset_path, dataset_out, waveform=waveform)
     writer.build()
 
     # test loading
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
             ae = fragment_class(txn.get(key))
-            audio = ae.get_audio("waveform")
-
+            assert ae.has_buffer("waveform") == waveform
+            if waveform:
+                audio = ae.get_audio("waveform")
+    env.close()
+    check_dataset_loading(dataset_out, waveform, test_k=test_k)
 
 
 @pytest.mark.parametrize('config', ['default.gin'])
-def test_slakh_dataset(config, test_name, test_k=2):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_slakh_dataset(config, waveform, test_name, test_k=2):
     # test writing
     set_gin_constant('CHUNK_LENGTH', 88200)
     set_gin_constant('HOP_LENGTH', 88200)
@@ -113,21 +120,27 @@ def test_slakh_dataset(config, test_name, test_k=2):
     dataset_out = OUT_TEST_DIR / "compiled" / test_name
     if dataset_out.exists():
         shutil.rmtree(dataset_out.resolve())
-    writer = LMDBWriter(dataset_path, dataset_out, filters=("**/stems/*"), features=[features.AfterMIDI(), features.Loudness()])
+    dataset_features = [features.AfterMIDI(), features.Loudness()]
+    writer = LMDBWriter(dataset_path, dataset_out, filters=("**/stems/*"), features=dataset_features, waveform=waveform)
     writer.build()
 
     # test loading
     env = lmdb.open(str(dataset_out), lock=False, readonly=True)
     fragment_class = get_fragment_class(read_metadata(dataset_out)['fragment_class'])
     with env.begin() as txn:
-        dataset_keys = list(txn.cursor().iternext(values=False))
+        # metadata entries (features, feature hash...) are not fragments
+        dataset_keys = [k for k in txn.cursor().iternext(values=False) if k.decode() not in non_buffer_keys]
         # pick a random item
         random_keys = random.choices(dataset_keys, k=test_k)
         for key in random_keys:
             ae = fragment_class(txn.get(key))
-            audio = ae.get_audio("waveform")
+            assert ae.has_buffer("waveform") == waveform
+            if waveform:
+                audio = ae.get_audio("waveform")
             midi = ae.get_data("midi")
             loudness = ae.get_array("loudness")
+    env.close()
+    check_dataset_loading(dataset_out, waveform, features=[f.feature_name for f in dataset_features], test_k=test_k)
 
 
 
@@ -135,7 +148,8 @@ def test_slakh_dataset(config, test_name, test_k=2):
 @pytest.mark.parametrize("channels", [None, 1, 2, 8])
 @pytest.mark.parametrize('config', ['default.gin'])
 @pytest.mark.parametrize("keep_gin_constants", [True, False])
-def test_preprocessing_fn(dataset, config, channels, keep_gin_constants, test_name):
+@pytest.mark.parametrize("waveform", [True, False])
+def test_preprocessing_fn(dataset, config, channels, keep_gin_constants, waveform, test_name):
     gin.clear_config(clear_constants=True)
     dataset_path = Path(__file__).parent / "datasets" / test_name
     os.makedirs(dataset_path, exist_ok=True)
@@ -148,6 +162,7 @@ def test_preprocessing_fn(dataset, config, channels, keep_gin_constants, test_na
         sample_rate=48000,
         channels=channels,
         keep_gin_constants=keep_gin_constants, 
+        waveform=waveform,
         force=True
     )
 
@@ -159,6 +174,7 @@ def test_preprocessing_fn(dataset, config, channels, keep_gin_constants, test_na
         assert len(constants) > 0
     else:
         assert len(constants) == 0
+    check_dataset_loading(dataset_path, waveform)
 
     
 
@@ -169,3 +185,29 @@ def test_preprocessing_fn(dataset, config, channels, keep_gin_constants, test_na
 
         
 
+
+
+@pytest.mark.parametrize("raise_exc", [False, True])
+def test_skip_unreadable_files(raise_exc, test_name, monkeypatch):
+    from acids_dataset import writers
+    monkeypatch.setattr(writers, "RAISE_EXC_IF_WRITER_ERROR", raise_exc)
+    gin.clear_config()
+    set_gin_constant('SAMPLE_RATE', 44100)
+    set_gin_constant('CHANNELS', 1)
+    gin.parse_config_file('rave.gin')
+    dataset_path = get_dataset("simple")
+    dataset_out = OUT_TEST_DIR / "compiled" / test_name
+    if dataset_out.exists():
+        shutil.rmtree(dataset_out.resolve())
+    writer = LMDBWriter(dataset_path, dataset_out)
+    if raise_exc:
+        with pytest.raises(raw.FileNotReadException):
+            writer.build()
+        return
+    writer.build()
+    # unreadable file is skipped and recorded, other files are parsed
+    metadata = read_metadata(dataset_out)
+    assert metadata['skipped_files'] == ["simple_dataset/short/empty.wav"]
+    original_paths = AudioDataset(str(dataset_out)).feature_hash['original_path']
+    assert not any(p.endswith("empty.wav") for p in original_paths)
+    assert len(original_paths) == len(audio_paths_from_dir(dataset_path)) - 1

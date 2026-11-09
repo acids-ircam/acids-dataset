@@ -101,4 +101,4 @@ from . import datasets
 from .preprocess import *
 from .update import *
 from .add_embedding import *
-from .utils import GinEnv
+from .utils import GinEnv, get_devices

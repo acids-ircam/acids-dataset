@@ -58,7 +58,7 @@ def preprocess_dataset(
     force: bool = False, 
     waveform: bool = True, 
     override = [],
-    device: str | None = None, 
+    device: str | torch.device | None = None, 
     max_db_size: int = 100, 
     compact: bool = False, 
     log: str | None = None, 

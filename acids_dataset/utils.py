@@ -528,4 +528,60 @@ def nearest_interp_np(signal: np.ndarray, target_length: int):
     out = signal[..., np.round(x_new).astype(int)]
     return out
 
-  
+
+def get_available_gpus(max_load: float = 0.30) -> list[torch.device]:
+    if not torch.cuda.is_available():
+        print("No CUDA-capable GPUs found by PyTorch.")
+        return []
+    torch_gpu_count = torch.cuda.device_count()
+    all_gpus = GPUtil.getGPUs()
+
+    available = []
+    for gpu in all_gpus:
+        if gpu.id >= torch_gpu_count:
+            # GPU is not visible to this PyTorch build (e.g. CUDA_VISIBLE_DEVICES filtered it)
+            continue
+        if gpu.load < max_load:
+            available.append(
+                # {
+                #     "index": gpu.id,
+                #     "name": gpu.name,
+                #     "load": gpu.load,
+                #     "memory_used_mb": gpu.memoryUsed,
+                #     "memory_total_mb": gpu.memoryTotal,
+                # }
+                torch.device('cuda:%d'%gpu.id)
+            )
+
+    return available
+
+def _get_available_devices() -> dict[str, list[torch.device]]:
+    available_devices = {'cpu': [torch.device('cpu')]}
+    if torch.mps.is_available(): 
+        available_devices['mps'] = [torch.device('mps')]
+    if torch.cuda.is_available():
+        available_devices['cuda'] = get_available_gpus()
+    return available_devices
+
+
+def get_devices(device_name: str | None = None, n_devices: int | None = None, strict: bool = False) -> torch.device | list[torch.device]:
+    sorted_accelerators = ['cuda', 'mps', 'cpu']
+    if device_name is None: device_name=sorted_accelerators[0]
+    if not n_devices: n_devices = 1
+
+    assert device_name in sorted_accelerators, "unknown accelerator : %s"%device_name
+    available_devices = _get_available_devices()
+    selected_device = None
+    for target_device in range(sorted_accelerators.index(device_name), len(sorted_accelerators)):
+        if (target_device not in available_devices): continue
+        if len(available_devices[target_device]) < n_devices and strict:
+            continue
+        selected_device = available_devices[target_device][:n_devices]
+
+    if selected_device is None: 
+        raise ValueError('Could not find valid device with device_name=%s and n_devices=%s')
+
+    if len(selected_device) == 0:
+        return selected_device[0]
+    else: 
+        return selected_device

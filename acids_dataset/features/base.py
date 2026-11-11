@@ -42,8 +42,8 @@ default_feature_pattern = """
 \tdevice=%DEVICE
 \t{{ARGS}}
 
-features.parse_features:
-    features = @features.{{NAME}}
+ad.features.parse_features:
+    features = @ad.features.{{NAME}}
 """
 
 class AcidsDatasetFeature(object):

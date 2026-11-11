@@ -16,7 +16,7 @@ from .. import get_writer_class_from_path, get_metadata_from_path, get_fragment_
 from .base import AudioDataset, TransformType, chunk_length_to_samples
 
 
-@gin.configurable(module="datasets")
+@gin.configurable(module="ad.datasets")
 class PreprocessedAudioDataset(AudioDataset):
     """AudioDataset loading fragments from a pre-processed dataset folder (see preprocess_dataset). Pre-processed features
     are read from the database, and describe the original audio ; features_after_transforms only applies to batch features

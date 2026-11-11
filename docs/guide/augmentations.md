@@ -1,6 +1,6 @@
 # Augmentations
 
-Data augmentations can work with both `np.ndarray` and `torch.Tensor`, and may be composed through the `transforms.Compose` that override usual list methods (`append` , `extend`, etc...). `acids-dataset` implements its own augmentations, and has a backend for the [audiomentations](https://github.com/iver56/audiomentations) package.
+Data augmentations can work with both `np.ndarray` and `torch.Tensor`, and may be composed through the `ad.transforms.Compose` that override usual list methods (`append` , `extend`, etc...). `acids-dataset` implements its own augmentations, and has a backend for the [audiomentations](https://github.com/iver56/audiomentations) package.
 
 Stochastic options of the base class are very powerful to develop versatile augmentation pipelines. For example :
 

@@ -27,7 +27,7 @@ class _RepresentationFeature(_ChannelFeature):
         return frames if window is None else frames * window
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class DCT(_RepresentationFeature):
     """Discrete cosine transform (type II, orthonormal) of windowed frames : the n_coeffs first coefficients of
     scipy.fft.dct(frame, norm="ortho") (all of them if n_coeffs is None). Output (..., n_coeffs, n_frames).
@@ -91,7 +91,7 @@ def erb_bandwidth(f):
     return 24.7 * (4.37 * f / 1000 + 1)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Gammatone(_RepresentationFeature):
     """Gammatone spectrogram : energy of frames in n_bands gammatone filters, with center frequencies equally spaced on
     the ERB-rate scale between fmin and fmax (Hz ; sr / 2 if None). Filters are applied in the frequency domain, on the
@@ -130,7 +130,7 @@ class Gammatone(_RepresentationFeature):
         return 10 * torch.log10(bands + _EPS) if self.db else bands
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Cepstrum(_RepresentationFeature):
     """Real cepstrum of windowed frames : inverse Fourier transform of the log magnitude spectrum (n_fft = frame_length),
     c = irfft(log(|rfft(frame)| + eps)). The n_coeffs first coefficients are kept (frame_length // 2 + 1 if None : the
@@ -313,7 +313,7 @@ class STFTStreamingModule(STFTModule):
         self.transform.reset()
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class STFT(_RepresentationFeature):
     """Short-time Fourier transform, computed with acids_transforms.STFT : rfft of windowed frames of frame_length
     samples, zero-padded to n_fft (frame_length if None), every hop_length samples (frame_length // 4 if None). With
@@ -418,7 +418,7 @@ class STFT(_RepresentationFeature):
         return self._build_module(streaming=True)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class DGT(_RepresentationFeature):
     """Discrete Gabor transform, computed with acids_transforms.DGT : STFT with a gaussian window of n_fft samples, every
     hop_length samples (n_fft // 4 if None). Frames are centered (signals are padded by reflection with n_fft // 2
@@ -486,7 +486,7 @@ class DGT(_RepresentationFeature):
         return _fit_length(x, length)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class FFT(_WaveformFeature):
     """Fourier transform of whole signals (chunks) : (..., C, T) -> (..., K), or (..., C, K) with keep_channels.
     Signals are cropped to n_fft samples (or zero-padded, after windowing) if n_fft is given, and windowed (window, None

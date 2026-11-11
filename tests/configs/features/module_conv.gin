@@ -1,16 +1,16 @@
 
 features/ModuleEmbedding:
     name = "conv_embedding"
-    module = @test.ConvEmbedding()
+    module = @ad.test.ConvEmbedding()
     method = "get_embedding"
     transforms = [
-        @transforms.Gain, 
-        @transforms.PitchShift
+        @ad.transforms.Gain, 
+        @ad.transforms.PitchShift
     ]
     sr = %SAMPLE_RATE
     retain_module = True
 
 parse_features:
-    features = [@features/features.ModuleEmbedding]
+    features = [@features/ad.features.ModuleEmbedding]
     device = %DEVICE
 

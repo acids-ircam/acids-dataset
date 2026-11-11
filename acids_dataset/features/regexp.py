@@ -43,7 +43,7 @@ def glob_to_regex(glob_pattern, feature_name):
     
     return regex_pattern
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class RegexpFeature(AcidsDatasetFeature):
     has_hash = True
 

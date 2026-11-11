@@ -36,7 +36,7 @@ def pqmf_filters(n_bands: int, attenuation: float = 100., length: int | None = N
     return 2 * h * np.cos((2 * k + 1) * np.pi / (2 * n_bands) * t + (-1) ** k * np.pi / 4)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class PQMF(_WaveformFeature):
     """Pseudo-QMF filter bank : splits signals (..., C, T) into n_bands critically sampled sub-bands
     (..., C * n_bands, ceil(T / n_bands)), bands of the first channel first ; signals are zero-padded to a multiple of

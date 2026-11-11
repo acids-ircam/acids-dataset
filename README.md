@@ -689,7 +689,7 @@ All features compute batches at once (`supports_batch`), except `BeatTrack`, `Af
 
 ## Data augmentation
 
-Data augmentations can work with both `np.ndarray` and `torch.Tensor`, and may be composed through the `transforms.Compose` that override usual list methods (`append` , `extend`, etc...). `acids-dataset` implements its own augmentations, and has a backend for the [audiomentations](https://github.com/iver56/audiomentations) package.
+Data augmentations can work with both `np.ndarray` and `torch.Tensor`, and may be composed through the `ad.transforms.Compose` that override usual list methods (`append` , `extend`, etc...). `acids-dataset` implements its own augmentations, and has a backend for the [audiomentations](https://github.com/iver56/audiomentations) package.
 
 
 Stochastic options of the base class are very powerful to develop versatile augmentation pipelines. For example :
@@ -809,8 +809,8 @@ CQT:
   device=%DEVICE
   sr = %SAMPLE_RATE
 
-features.parse_features:
-  features = @features.CQT
+ad.features.parse_features:
+  features = @ad.features.CQT
 ```
 
 and update your database using `acids-dataset update --path ... --feature cqt_rene`. The feature will be added as `cqt_rene`, as the name in the configuration as been specified. 
@@ -887,8 +887,8 @@ Compress:
   limit = False
   sr = %SAMPLE_RATE
 
-transforms.parse_transform:
-    transform = @transforms.Compress
+ad.transforms.parse_transform:
+    transform = @ad.transforms.Compress
 ```
 
 ### Implementing transforms
@@ -1257,7 +1257,7 @@ Available presets and their values can be listed with `acids-dataset presets` (a
 
 ## Writing presets
 
-Custom presets can be placed in an `ad_configs` folder of the current working directory (local presets take precedence over the ones of `acids_dataset/configs`), or given as paths to `.gin` files. Presets usually include `default.gin`, that binds these values to pre-processing (`RawParser`) and online datasets (`OnlineAudioDataset`), and redefine them. Features of `features.parse_features` are computed in both modes ; parameters specific to one mode can be bound to `RawParser` (pre-processing, e.g. `loudness_threshold`, `discard_if_lower_than`) or to `OnlineAudioDataset` (online, e.g. `batch_by`, `pad_mode`). For example, `$(pwd)/ad_configs/rave_loudness.gin` : 
+Custom presets can be placed in an `ad_configs` folder of the current working directory (local presets take precedence over the ones of `acids_dataset/configs`), or given as paths to `.gin` files. Presets usually include `default.gin`, that binds these values to pre-processing (`RawParser`) and online datasets (`OnlineAudioDataset`), and redefine them. Features of `ad.features.parse_features` are computed in both modes ; parameters specific to one mode can be bound to `RawParser` (pre-processing, e.g. `loudness_threshold`, `discard_if_lower_than`) or to `OnlineAudioDataset` (online, e.g. `batch_by`, `pad_mode`). For example, `$(pwd)/ad_configs/rave_loudness.gin` : 
 
 ```yaml
 include 'rave.gin'
@@ -1268,8 +1268,8 @@ Loudness:
     sr = %SAMPLE_RATE
     device = %DEVICE
 
-features.parse_features:
-    features = [@features.Loudness]
+ad.features.parse_features:
+    features = [@ad.features.Loudness]
 
 RawParser:
     loudness_threshold = -60

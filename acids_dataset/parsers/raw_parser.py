@@ -131,7 +131,7 @@ class ImportBackend(enum.Enum):
             raise ValueError('No backend for %s'%self)
 
 
-@gin.configurable(module="parser")
+@gin.configurable(module="ad.parser")
 class RawParser(object):
     def __init__(
             self, 

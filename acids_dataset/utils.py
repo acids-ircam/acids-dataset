@@ -397,7 +397,7 @@ def get_random_hash(n=8):
     return "".join([chr(random.randrange(97,122)) for i in range(n)])
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 def parse_features(features=None, device=None, add_args=None):
     if features is None: 
         return []
@@ -422,8 +422,9 @@ def feature_from_gin_config(config_path, add_args=None):
 
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 def parse_transform(transform, add_args=None):
+    if add_args is None: add_args = tuple(), dict()
     return transform(*add_args[0], **add_args[1])
 
 

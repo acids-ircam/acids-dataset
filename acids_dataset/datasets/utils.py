@@ -154,10 +154,10 @@ def _transform_outputs(outs, transforms, n_channels=None):
                 outs = transforms(_check_channels(outs, n_channels))
     return outs
 
-@gin.configurable(module="data")        
+@gin.configurable(module="ad.data")        
 def split_dataset(dataset, **parts):
     raise NotImplementedError
 
-@gin.configurable(module="data")
+@gin.configurable(module="ad.data")
 def get_data_loader(dataset, **kwargs):
     return torch.utils.data.DataLoader(dataset, **kwargs)

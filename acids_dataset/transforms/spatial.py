@@ -6,7 +6,7 @@ import torch
 from .base import Transform
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class MidSide(Transform):
     """Mid / side transform of stereo signals : (..., 2, T) -> (..., 2, T), mid first. Raises a ValueError if inputs do
     not have 2 channels.

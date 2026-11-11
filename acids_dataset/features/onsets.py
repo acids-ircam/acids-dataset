@@ -24,7 +24,7 @@ class _OnsetFeature(_SpectralFeature):
         return self.sr / self.hop_length
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class OnsetStrength(_OnsetFeature):
     """onset strength per frame (rectified spectral flux of log-magnitude spectra)."""
     @property
@@ -44,7 +44,7 @@ def _peaks(strength: torch.Tensor, threshold: float, min_distance: int) -> torch
     return is_max & (strength > mean + threshold * std) & (strength > _EPS)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class OnsetRate(_OnsetFeature):
     """number of onsets per second in a chunk (peaks of onset strength above mean + threshold * std, separated by
     min_interval seconds)."""
@@ -65,7 +65,7 @@ class OnsetRate(_OnsetFeature):
         return peaks.float().sum(-1) / max(duration, _EPS)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Tempo(_OnsetFeature):
     """tempo of a chunk (BPM) : lag of the maximum of the autocorrelation of onset strength between min_bpm and max_bpm,
     weighted by a log-normal prior around prior_bpm (that reduces octave errors) and refined by parabolic interpolation."""

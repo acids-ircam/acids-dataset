@@ -11,7 +11,7 @@ from .base import AcidsDatasetFeature
 from .framed import _EPS, _frames, _as_tensor, _FramedFeature, _WaveformFeature
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Width(_FramedFeature):
     """Stereo width per frame, from a mid / side analysis. The mid signal is the mean of channels, and the side signal
     the residual of each channel (x_c - mid) : for stereo signals, mid = (L + R) / 2 and side = +/- (L - R) / 2, and the
@@ -53,7 +53,7 @@ class Width(_FramedFeature):
         return torch.stack([mid_db, side_db], dim=-2)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpatialCovariance(_FramedFeature):
     """Spatial covariance matrices between channels, per frame.
 
@@ -104,7 +104,7 @@ class SpatialCovariance(_FramedFeature):
         return cov.movedim(-5, -1)                                        # (..., 2, B, C, C, F)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class CrossSpectralMatrix(_FramedFeature):
     """Cross spectral matrices (CSM) between channels, per frequency bin and per frame, as used in beamforming and
     acoustic imaging. Each frame (frame_length, hop_length) is estimated with Welch's method : the frame is split in
@@ -187,7 +187,7 @@ def _real_dft_matrix(n: int) -> np.ndarray:
     return np.stack(rows)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectroSpatialCovarianceVector(_FramedFeature):
     """Spectro-Spatial Covariance Vector (SSCV), from Meng et al., "Blind Estimation of Sub-band Acoustic Parameters
     from Ambisonics Recordings using Spectro-Spatial Covariance Features" (ICASSP 2025, arXiv:2411.03172). Designed
@@ -264,7 +264,7 @@ def _pairs(x: torch.Tensor) -> torch.Tensor:
     return torch.cat([x, x], dim=-2) if x.shape[-2] == 1 else x
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class InterChannelLevelDifference(_FramedFeature):
     """level difference (dB) of each channel relative to the first one, per frame : (..., C - 1, n_frames) ; per linear 
     frequency band with n_bands : (..., C - 1, n_bands, n_frames). Positive values : the channel is louder than the first one."""
@@ -308,7 +308,7 @@ class _CrossCorrelationFeature(_FramedFeature):
         return xcorr, torch.arange(-max_lag, max_lag + 1, device=frames.device, dtype=frames.dtype)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class InterChannelTimeDifference(_CrossCorrelationFeature):
     """time difference of each channel relative to the first one (lag of the maximum of their cross-correlation within 
     +/- max_delay, refined by parabolic interpolation), per frame : (..., C - 1, n_frames), in samples or seconds (unit). 
@@ -339,7 +339,7 @@ def _parabolic_peak(xcorr: torch.Tensor):
     return index + offset, mid
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class InterChannelCoherence(_CrossCorrelationFeature):
     """maximum absolute normalized cross-correlation of each channel with the first one within +/- max_delay, per frame : 
     (..., C - 1, n_frames), in [0, 1] (1 for identical or delayed channels, ~0 for uncorrelated channels)."""
@@ -351,7 +351,7 @@ class InterChannelCoherence(_CrossCorrelationFeature):
         return xcorr.abs().amax(-1).clamp(max=1.)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class GeneralizedCrossCorrelation(_FramedFeature):
     """Generalized cross-correlation (GCC, Knapp & Carter, "The generalized correlation method for estimation of time
     delay", 1976) between pairs of channels, per frame, for time delay estimation (TDOA) and sound source localization.
@@ -458,7 +458,7 @@ class GeneralizedCrossCorrelation(_FramedFeature):
         return delay / self.sr if self.unit == "seconds" else delay
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Pan(_FramedFeature):
     """stereo position per frame, from the energies of the first two channels : (E_1 - E_0) / (E_1 + E_0), in [-1, 1] 
     (-1 : left only, 0 : center, 1 : right only ; 0 for mono and silent frames). Output (..., n_frames)."""

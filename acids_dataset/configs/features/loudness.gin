@@ -4,5 +4,5 @@ Loudness:
 	sr = %SAMPLE_RATE
 	mode = "lufs"
 
-features.parse_features:
-    features = @features.Loudness
+ad.features.parse_features:
+    features = @ad.features.Loudness

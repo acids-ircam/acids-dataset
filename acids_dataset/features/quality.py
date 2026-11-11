@@ -14,7 +14,7 @@ class _ChunkFeature(_ChannelFeature):
     _channel_axis = -1
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class ClippingRatio(_ChunkFeature):
     """ratio of samples whose absolute value reaches threshold (clipped samples)."""
     def __init__(self, threshold: float = 0.999, keep_channels: bool = False, sr: int = 44100, **kwargs):
@@ -34,7 +34,7 @@ class ClippingRatio(_ChunkFeature):
         return ratio if self.keep_channels else ratio.mean(-1, keepdim=True)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Peak(_ChunkFeature):
     """maximum absolute amplitude of a chunk, linear (db=False) or in dBFS (db=True) : of each channel with keep_channels,
     the maximum over channels otherwise (peaks are measured on channels, as mixes would hide them)."""
@@ -56,7 +56,7 @@ class Peak(_ChunkFeature):
         return 20 * torch.log10(peak + _EPS) if self.db else peak
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class DCOffset(_ChunkFeature):
     """mean value of the signal (of each channel with keep_channels, of the mix otherwise)."""
     def __init__(self, keep_channels: bool = True, sr: int = 44100, **kwargs):
@@ -69,7 +69,7 @@ class DCOffset(_ChunkFeature):
         return x.mean(-1)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class DynamicRange(_ChunkFeature):
     """difference (dB) between the high and low percentiles of the RMS of frames of a chunk, ignoring frames quieter than
     silence_db."""
@@ -89,7 +89,7 @@ class DynamicRange(_ChunkFeature):
         return torch.where(active.any(-1), high - low, torch.zeros_like(high))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SilenceRatio(_ChunkFeature):
     """ratio of frames whose RMS is below threshold_db."""
     def __init__(self, frame_length: int = 2048, hop_length: int | None = None, threshold_db: float = -60., keep_channels: bool = False,
@@ -105,7 +105,7 @@ class SilenceRatio(_ChunkFeature):
         return (rms_db < self.threshold_db).float().mean(-1)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class LoudnessMeter(_ChunkFeature):
     """loudness statistics of a chunk, computed on the levels of its frames : RMS level in dBFS (db), A-weighted RMS
     level in dB(A) (dba, IEC 61672 weighting, 0 dB at 1 kHz), and loudness in LUFS (lufs, ITU-R BS.1770 K-weighting,

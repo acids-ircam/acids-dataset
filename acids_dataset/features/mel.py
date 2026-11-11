@@ -7,7 +7,7 @@ from . import RAISE_EXC_IF_FEATURE_ERROR
 from .base import AcidsDatasetFeature
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Mel(AcidsDatasetFeature):
     def __init__(
             self, 

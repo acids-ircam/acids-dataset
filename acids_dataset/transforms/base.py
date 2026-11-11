@@ -14,8 +14,8 @@ gin_config_pattern = """
 %s:
 \t%s
 
-transforms.parse_transform:
-    transform = @transforms.%s()
+ad.transforms.parse_transform:
+    transform = @ad.transforms.%s()
 """
 
 
@@ -52,8 +52,8 @@ gin_config_pattern = """
 {{NAME}}:
 \t{{ARGS}}
 
-transforms.parse_transform:
-    transform = @transforms.{{NAME}}
+ad.transforms.parse_transform:
+    transform = @ad.transforms.{{NAME}}
 """
 
 def check_transform_configs(module, path):
@@ -175,7 +175,7 @@ class Transform():
         return out
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class Compose(UserList):
     def __init__(self, *args: Transform, transforms: List[Transform] | None = None):
         """Compose sequentially applies conteined transforms. Subclass of UserLit, such that most methods like append, extend,

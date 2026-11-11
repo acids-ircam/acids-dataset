@@ -11,7 +11,7 @@ from typing import List, Dict
 from .. import transforms as adt
 import gin.torch
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class ModuleEmbedding(AcidsDatasetFeature):
     def __init__(self, 
                  module: nn.Module | None = None, 

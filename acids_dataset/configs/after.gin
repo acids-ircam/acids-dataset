@@ -12,5 +12,5 @@ RawParser:
 OnlineAudioDataset:
     loudness_threshold = -60
 
-#features.parse_features:
-#   features = [@features.AfterMIDI]
+#ad.features.parse_features:
+#   features = [@ad.features.AfterMIDI]

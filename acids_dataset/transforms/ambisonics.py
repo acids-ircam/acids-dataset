@@ -127,7 +127,7 @@ def _select(x: torch.Tensor, candidates, matrix_fn, what: str):
     raise ValueError("%s cannot be inferred from signals (candidates : %s)"%(what, candidates))
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class AmbisonicEncoder(Transform):
     """Encodes multichannel signals into ambisonics : (..., C, T) -> (..., (N + 1)^2, T). Each input channel is a
     source in the direction given by layout (a name of LAYOUTS, a list of (azimuth, elevation) in degrees, or None : mono,
@@ -239,7 +239,7 @@ class AmbisonicEncoder(Transform):
         return self.inverse(n_channels).apply(a)
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class AmbisonicDecoder(Transform):
     """Decodes ambisonic signals (..., K, T), in ACN order and SN3D or N3D normalization, to the loudspeakers of layout :
     (..., L, T).

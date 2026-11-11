@@ -11,8 +11,8 @@ CQT:
   device=%DEVICE
   sr = %SAMPLE_RATE
 
-features.parse_features:
-  features = @features.CQT
+ad.features.parse_features:
+  features = @ad.features.CQT
 ```
 
 and update your database using `acids-dataset update --path ... --feature cqt_rene`. The feature will be added as `cqt_rene`, as the name in the configuration as been specified. 
@@ -88,8 +88,8 @@ Compress:
   limit = False
   sr = %SAMPLE_RATE
 
-transforms.parse_transform:
-    transform = @transforms.Compress
+ad.transforms.parse_transform:
+    transform = @ad.transforms.Compress
 ```
 
 ## Implementing transforms

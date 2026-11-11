@@ -97,7 +97,7 @@ def build_audiomentation_wrapper(cls):
             
         
     new_class = type(obj.__name__, (_AudiomentationWrapper,), dict(_AudiomentationWrapper.__dict__))
-    new_class = gin.configurable(new_class, module="transforms")
+    new_class = gin.configurable(new_class, module="ad.transforms")
     return new_class
 
 

@@ -26,7 +26,7 @@ class _UnitFeature(_SpectralFeature):
         self.unit = unit
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralCentroid(_UnitFeature):
     """center of mass of the power spectrum (brightness)."""
     @property
@@ -38,7 +38,7 @@ class SpectralCentroid(_UnitFeature):
         return torch.where(active, convert_frequency(centroid, self.unit, self.sr), torch.zeros_like(centroid))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralSpread(_UnitFeature):
     """standard deviation of the power spectrum around its centroid (bandwidth)."""
     units = ["hz", "normalized"]
@@ -52,7 +52,7 @@ class SpectralSpread(_UnitFeature):
         return torch.where(active, convert_frequency(spread, self.unit, self.sr), torch.zeros_like(spread))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralSkewness(_SpectralFeature):
     """asymmetry of the power spectrum around its centroid (negative : energy above the centroid)."""
     @property
@@ -65,7 +65,7 @@ class SpectralSkewness(_SpectralFeature):
         return torch.where(active & (spread > _EPS), skewness, torch.zeros_like(skewness))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralKurtosis(_SpectralFeature):
     """peakedness of the power spectrum around its centroid (3 for gaussian distributions)."""
     @property
@@ -78,7 +78,7 @@ class SpectralKurtosis(_SpectralFeature):
         return torch.where(active & (spread > _EPS), kurtosis, torch.zeros_like(kurtosis))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralRolloff(_UnitFeature):
     """frequency below which a ratio (percentile, 0.85 by default) of the spectral energy lies."""
     def __init__(self, frame_length: int = 2048, hop_length: int | None = None, percentile: float = 0.85, unit: str = "hz",
@@ -99,7 +99,7 @@ class SpectralRolloff(_UnitFeature):
         return torch.where(total[..., 0] > _EPS, convert_frequency(rolloff, self.unit, self.sr), torch.zeros_like(rolloff))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralFlatness(_SpectralFeature):
     """geometric mean / arithmetic mean of the power spectrum, in [0, 1] (1 for white noise, ~0 for pure tones) ; in dB if db."""
     def __init__(self, frame_length: int = 2048, hop_length: int | None = None, db: bool = False, keep_channels: bool = False,
@@ -119,7 +119,7 @@ class SpectralFlatness(_SpectralFeature):
         return 10 * torch.log10(flatness + _EPS) if self.db else flatness
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralCrest(_SpectralFeature):
     """max / mean of the power spectrum (high for peaky spectra)."""
     @property
@@ -131,7 +131,7 @@ class SpectralCrest(_SpectralFeature):
         return torch.where(mean > _EPS, power.max(-1).values / mean.clamp(min=_EPS), torch.zeros_like(mean))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralFlux(_SpectralFeature):
     """spectral change between consecutive frames : norm of the positive differences of normalized magnitude spectra
     (0 for the first frame and for stationary signals)."""
@@ -147,7 +147,7 @@ class SpectralFlux(_SpectralFeature):
         return torch.cat([flux.new_zeros(flux.shape[:-1] + (1,)), flux], dim=-1)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class SpectralContrast(_SpectralFeature):
     """difference (dB) between peaks and valleys of the spectrum in n_bands octave bands above fmin : mean power of the
     top and bottom quantile of each band. Output (..., n_bands, n_frames)."""

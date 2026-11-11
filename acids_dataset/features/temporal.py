@@ -6,7 +6,7 @@ import torch
 from .framed import _EPS, _frames, _ChannelFeature
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class RMS(_ChannelFeature):
     """root mean square energy per frame, in dB (floored to min_db) or linear (db=False)."""
     def __init__(self, frame_length: int = 2048, hop_length: int | None = None, db: bool = True, min_db: float = -100.,
@@ -22,7 +22,7 @@ class RMS(_ChannelFeature):
         return (20 * torch.log10(rms + _EPS)).clamp(min=self.min_db) if self.db else rms
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class ZeroCrossingRate(_ChannelFeature):
     """sign changes per frame, as a ratio of samples (unit="ratio"), or as a frequency (unit="hz" : the frequency of a sine
     with the same rate)."""
@@ -54,7 +54,7 @@ class _EnvelopeFeature(_ChannelFeature):
         return torch.sqrt(_frames(x, self.frame_length, self.hop_length).square().mean(-1))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class AttackTime(_EnvelopeFeature):
     """time (seconds) for the envelope of a chunk to rise from low (10%) to high (90%) of its maximum, before the maximum."""
     def __init__(self, envelope_length: int = 256, low: float = 0.1, high: float = 0.9, keep_channels: bool = False, sr: int = 44100, **kwargs):
@@ -78,7 +78,7 @@ class AttackTime(_EnvelopeFeature):
         return torch.where(peak_value > _EPS, attack, torch.zeros_like(attack))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class TemporalCentroid(_EnvelopeFeature):
     """center of mass of the envelope of a chunk, in seconds."""
     @property
@@ -91,7 +91,7 @@ class TemporalCentroid(_EnvelopeFeature):
         return torch.where(total > _EPS, (env * times).sum(-1) / total.clamp(min=_EPS), torch.zeros_like(total))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class CrestFactor(_ChannelFeature):
     """peak / RMS ratio of a chunk, in dB (db=True) or linear."""
     _channel_axis = -1

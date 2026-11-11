@@ -35,6 +35,10 @@ class Chroma(_SpectralFeature):
             chroma = chroma / chroma.sum(-2, keepdim=True).clamp(min=_EPS)
         return chroma
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import ChromaModule
+        return ChromaModule(self.frame_length, self.hop_length, self.fmin, self.fmax, self.norm, self.keep_channels, self.sr)
+
 
 def _autocorrelation(frames: torch.Tensor) -> torch.Tensor:
     """unbiased normalized autocorrelation of frames (..., L), over lags [0, L)."""
@@ -87,6 +91,10 @@ class Harmonicity(_ChannelFeature):
     def compute(self, x):
         return _periodicity(_frames(x, self.frame_length, self.hop_length), self.sr, self.fmin, self.fmax)[0]
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import HarmonicityModule
+        return HarmonicityModule(self.frame_length, self.hop_length, self.fmin, self.fmax, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class Inharmonicity(_SpectralFeature):
@@ -131,6 +139,10 @@ class Inharmonicity(_SpectralFeature):
         total = weights.sum(-1)
         inharmonicity = (deviations * weights).sum(-1) / total.clamp(min=_EPS)
         return torch.where((total > _EPS) & (periodicity > 0), inharmonicity, torch.zeros_like(inharmonicity))
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import InharmonicityModule
+        return InharmonicityModule(self.frame_length, self.hop_length, self.n_harmonics, self.fmin, self.fmax, self.keep_channels, self.sr)
 
 
 __all__ = ['Chroma', 'Harmonicity', 'Inharmonicity']

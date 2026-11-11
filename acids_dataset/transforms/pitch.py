@@ -17,6 +17,7 @@ _BASICPITCH_MODELS = {
 
 
 class BasicPitch(Transform):
+    allow_random = False
     available_models = _BASICPITCH_MODELS
     def __init__(self, 
                  device="cpu", 

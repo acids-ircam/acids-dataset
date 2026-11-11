@@ -70,6 +70,7 @@ def check_transform_configs(module, path):
             
 
 class Transform():
+    # deterministic transforms set allow_random to False : they then cannot be given a probability p
     allow_random: bool = True
     input_types = TransformInput
     takes_as_input = TransformInput.none
@@ -88,6 +89,8 @@ class Transform():
             p (float | None, optional): Optional probability (must allow random). Defaults to None.
             rand_batchwise (bool, optional): Is randomness batchwise or indexwise. Defaults to True.
         """
+        if (p is not None) and (not self.allow_random):
+            raise AcidsTransformException("%s is not a probabilistic transform : p must be None, got %s"%(type(self).__name__, p))
         self.sr = sr
         self.name = name
         self.p = p
@@ -149,6 +152,12 @@ class Transform():
     def apply(self, x: np.ndarray):
         return x
 
+    def nn_module(self, **kwargs) -> torch.nn.Module:
+        """TorchScript-compatible torch.nn.Module computing the transform (forward), deterministically (the probability p
+        is ignored), with an invert method for invertible transforms. Raises a NotImplementedError for transforms without
+        module (random augmentations, numpy-based transforms)."""
+        raise NotImplementedError("%s has no nn_module"%type(self).__name__)
+
     def apply_random(self, x):
         if not self.allow_random:
             raise AcidsTransformException("transform %s does not allow random."%type(self).__name__)
@@ -194,6 +203,11 @@ class Compose(UserList):
         for elm in self: 
             x = elm.apply(x)
         return x
+
+    def nn_module(self, **kwargs) -> torch.nn.Module:
+        """module applying the modules of contained transforms sequentially (see Transform.nn_module)."""
+        from .nn_modules import ComposeModule
+        return ComposeModule([t.nn_module(**kwargs) for t in self])
 
     def __call__(self, x, **kwargs):
         for elm in self:

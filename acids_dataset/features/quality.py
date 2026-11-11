@@ -33,6 +33,10 @@ class ClippingRatio(_ChunkFeature):
         ratio = (x.abs() >= self.threshold).float().mean(-1)
         return ratio if self.keep_channels else ratio.mean(-1, keepdim=True)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import ClippingRatioModule
+        return ClippingRatioModule(self.threshold, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class Peak(_ChunkFeature):
@@ -55,6 +59,10 @@ class Peak(_ChunkFeature):
             peak = peak.amax(-1, keepdim=True)
         return 20 * torch.log10(peak + _EPS) if self.db else peak
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import PeakModule
+        return PeakModule(self.db, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class DCOffset(_ChunkFeature):
@@ -67,6 +75,10 @@ class DCOffset(_ChunkFeature):
 
     def compute(self, x):
         return x.mean(-1)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import DCOffsetModule
+        return DCOffsetModule(self.keep_channels, self.sr)
 
 
 @gin.configurable(module="ad.features")
@@ -88,6 +100,10 @@ class DynamicRange(_ChunkFeature):
         high, low = torch.nanquantile(masked, self.high, dim=-1), torch.nanquantile(masked, self.low, dim=-1)
         return torch.where(active.any(-1), high - low, torch.zeros_like(high))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import DynamicRangeModule
+        return DynamicRangeModule(self.frame_length, self.hop_length, self.low, self.high, self.silence_db, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class SilenceRatio(_ChunkFeature):
@@ -103,6 +119,10 @@ class SilenceRatio(_ChunkFeature):
     def compute(self, x):
         rms_db = 20 * torch.log10(torch.sqrt(_frames(x, self.frame_length, self.hop_length).square().mean(-1)) + _EPS)
         return (rms_db < self.threshold_db).float().mean(-1)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import SilenceRatioModule
+        return SilenceRatioModule(self.frame_length, self.hop_length, self.threshold_db, self.keep_channels, self.sr)
 
 
 @gin.configurable(module="ad.features")

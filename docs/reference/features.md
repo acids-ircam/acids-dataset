@@ -82,3 +82,12 @@
 ::: acids_dataset.features.regexp.RegexpFeature
 
 ::: acids_dataset.features.module.ModuleEmbedding
+
+## TorchScript modules
+
+Modules given by `feature.nn_module()` (see [TorchScript modules](../guide/features.md#torchscript-modules)).
+
+::: acids_dataset.features.nn_modules
+    options:
+      show_root_heading: false
+      members: [FeatureModule, RMSModule, ZeroCrossingRateModule, AttackTimeModule, TemporalCentroidModule, CrestFactorModule, SpectralMomentModule, SpectralRolloffModule, SpectralFlatnessModule, SpectralCrestModule, SpectralFluxModule, SpectralContrastModule, ClippingRatioModule, PeakModule, DCOffsetModule, DynamicRangeModule, SilenceRatioModule, OnsetStrengthModule, OnsetRateModule, TempoModule, ChromaModule, HarmonicityModule, InharmonicityModule, DCTModule, GammatoneModule, CepstrumModule, PQMFModule]

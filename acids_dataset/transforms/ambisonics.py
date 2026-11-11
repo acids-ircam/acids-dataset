@@ -197,6 +197,18 @@ class AmbisonicEncoder(Transform):
         matrix = torch.as_tensor(self.encoding_matrix(x.shape[-2]), dtype=x.dtype, device=x.device)
         return matrix @ x
 
+    def nn_module(self, n_channels: int | None = None, **kwargs):
+        """module encoding signals of n_channels channels (forward) and decoding them back (invert). n_channels may be
+        omitted if the transform has a layout."""
+        from .nn_modules import ChannelMatrixModule
+        if n_channels is None:
+            if self.layout is None:
+                raise ValueError("AmbisonicEncoder.nn_module needs n_channels when layout is None")
+            n_channels = len(get_layout(self.layout))
+        order = self.get_order(n_channels)
+        return ChannelMatrixModule(torch.from_numpy(self.encoding_matrix(n_channels)),
+                                   torch.from_numpy(self.inverse(n_channels).decoding_matrix(order)))
+
     def _order_or_none(self, n_channels: int) -> int | None:
         try:
             return self.get_order(n_channels)
@@ -320,6 +332,23 @@ class AmbisonicDecoder(Transform):
         order = self.get_order(x.shape[-2])
         matrix = torch.as_tensor(self.decoding_matrix(order), dtype=x.dtype, device=x.device)
         return matrix @ x
+
+    def nn_module(self, n_channels: int | None = None, **kwargs):
+        """module decoding ambisonic signals of n_channels channels (forward) and encoding loudspeaker signals back
+        (invert). n_channels may be omitted if the order is fixed."""
+        from .nn_modules import ChannelMatrixModule
+        if self.order != "adaptive":
+            order = self.order
+        elif n_channels is not None:
+            order = ambisonic_order(n_channels)
+        else:
+            raise ValueError("AmbisonicDecoder.nn_module needs n_channels when order is adaptive")
+        decoding = self.decoding_matrix(order)
+        if self.method == "mode_matching":
+            encoding = self.inverse(order).encoding_matrix(decoding.shape[0])
+        else:
+            encoding = np.linalg.pinv(decoding)
+        return ChannelMatrixModule(torch.from_numpy(decoding), torch.from_numpy(encoding))
 
     def invert(self, data, order: int | None = None) -> torch.Tensor:
         """ambisonic signals (..., (N + 1)^2, T) from loudspeaker signals (..., L, T). The order is the fixed order of

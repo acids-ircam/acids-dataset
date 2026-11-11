@@ -17,6 +17,8 @@ ad.features.parse_features:
 
 and update your database using `acids-dataset update --path ... --feature cqt_rene`. The feature will be added as `cqt_rene`, as the name in the configuration as been specified. 
 
+A default configuration file is written for every feature (`<feature name in lowercase>.gin`, e.g. `spectralcentroid.gin`, or `pitch_crepe.gin` / `f0_yin.gin` for features with several configurations) and for every transform (in `acids_dataset/configs/transforms`) when `acids_dataset` is imported, if it is missing. These files list the arguments of the class with their default values, and are a good starting point for custom configurations.
+
 ## Implementing features
 You can add your own features by subclassing the `AcidsDatasetFeature` object. 
 
@@ -97,7 +99,7 @@ ad.transforms.parse_transform:
 A new transform can be done as follows :
 
 ```python
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class NewTransform(Transform):
     takes_as_input = Transform.input_types.torch
     allow_random = True
@@ -110,4 +112,28 @@ class NewTransform(Transform):
 ```
 
 and... that's it! `apply` provides the main operating function for data processing, and is directly called by `Transform` if `p=None` or randomly called if `p>0`.
-The `allow_random` attributes if transform can be randomized. You can also overload the method `apply_random(self, x)` to override how the transform behaves when `p>0`.
+The `allow_random` attributes if transform can be randomized. You can also overload the method `apply_random(self, x)` to override how the transform behaves when `p>0`. Deterministic transforms (that are not augmentations) should set `allow_random = False` : giving them a probability `p` then raises an `AcidsTransformException` (see [Deterministic transforms](augmentations.md#deterministic-transforms)).
+
+## TorchScript modules for new features and transforms
+
+Features and transforms may implement `nn_module(self, **kwargs)`, returning a `torch.nn.Module` compatible with `torch.jit.script` that computes the same outputs (see [TorchScript modules of features](features.md#torchscript-modules) and [of transforms](augmentations.md#torchscript-modules)). The default implementation raises a `NotImplementedError`. Invertible features and transforms should also give their module an `invert` method, decorated with `@torch.jit.export`.
+
+```python
+import torch
+from acids_dataset.features import FeatureModule
+
+class MyDescriptorModule(FeatureModule):
+    def __init__(self, frame_length: int, hop_length: int, keep_channels: bool, sr: int):
+        super().__init__(keep_channels, frame_length=frame_length, hop_length=hop_length, sr=sr)
+
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        # x : (..., C, T), with C = 1 (mix of channels) if keep_channels is False
+        return self.frames(x).abs().amax(-1)          # (..., C, n_frames)
+
+class MyDescriptor(AcidsDatasetFeature):
+    ...
+    def nn_module(self, **kwargs):
+        return MyDescriptorModule(self.frame_length, self.hop_length, self.keep_channels, self.sr)
+```
+
+`FeatureModule` mixes channels before `compute` (unless `keep_channels=True`, or `mix_channels=False` to receive every channel), removes the channel axis of outputs without `keep_channels`, and gives the helpers `frames(x)` and `power_spectrum(x)` (power spectrum of hann-windowed frames, and frequencies of bins). Transform modules can subclass `acids_dataset.transforms.TransformModule`.

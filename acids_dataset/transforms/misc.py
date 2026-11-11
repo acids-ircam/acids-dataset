@@ -23,15 +23,19 @@ class Resample(Transform):
     """
     Resample target signal to target sample rate.
     """
+    allow_random = False
     takes_as_input = Transform.input_types.torch
     def __init__(self, sr: int | None = None, target_sr: int | None = None, **kwargs):
-        super().__init__(sr=sr)
+        super().__init__(sr=sr, **kwargs)
         assert self.sr is not None, "Resample needs the sr keyword"
         self.target_sr = target_sr or self.sr
 
     def apply(self, x):
         if (self.sr == self.target_sr): return x
         return torchaudio.functional.resample(x, self.sr, self.target_sr)
+
+    def nn_module(self, **kwargs):
+        return torchaudio.transforms.Resample(self.sr, self.target_sr)
 
     @classmethod
     def test(cls):
@@ -43,6 +47,7 @@ class Resample(Transform):
 
 @gin.configurable(module="ad.transforms")
 class PreEmphasis(Transform):
+    allow_random = False
     takes_as_input = Transform.input_types.torch
     def __init__(self, coeff: float = 0.97, **kwargs): 
         super().__init__(**kwargs)
@@ -50,6 +55,10 @@ class PreEmphasis(Transform):
 
     def apply(self, x):
         return torchaudio.functional.preemphasis(x, self.coeff)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import PreEmphasisModule
+        return PreEmphasisModule(float(self.coeff))
 
 
 @gin.configurable(module="ad.transforms")
@@ -115,19 +124,29 @@ class Stretch(Transform):
 
 @gin.configurable(module="ad.transforms")
 class Log1p(Transform):
-    def __init__(self, contrast=1.0, p = 1.0, **kwargs):
-        super().__init__(p=p, **kwargs)
+    allow_random = False
+    def __init__(self, contrast=1.0, **kwargs):
+        super().__init__(**kwargs)
         self.contrast = contrast
     def apply(self, x):
         return torch.log(1 + torch.clamp(x * self.contrast, 1e-5))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import Log1pModule
+        return Log1pModule(float(self.contrast))
+
 @gin.configurable(module="ad.transforms")
 class Exp1m(Transform):
-    def __init__(self, contrast=1.0, p = 1.0, **kwargs):
-        super().__init__(p=p, **kwargs)
+    allow_random = False
+    def __init__(self, contrast=1.0, **kwargs):
+        super().__init__(**kwargs)
         self.contrast = contrast
     def apply(self, x):
         return torch.exp(x) / self.contrast - 1
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import Exp1mModule
+        return Exp1mModule(float(self.contrast))
 
 
 @gin.configurable(module="ad.transforms")
@@ -434,24 +453,40 @@ class RandomDistort(Transform):
 
 @gin.configurable(module="ad.transforms")
 class Normalize(Transform):
+    allow_random = False
     takes_as_input = Transform.input_types.torch
     def apply(self, x):
         return normalize_signal(x)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import NormalizeModule
+        return NormalizeModule()
+
 @gin.configurable(module="ad.transforms")
 class Derivator(Transform):
+    allow_random = False
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     def apply(self, x):
         return derivate(x)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import LFilterModule
+        return LFilterModule(torch.Tensor([.5, -.5]), torch.Tensor([1., 0.]))
+
 @gin.configurable(module="ad.transforms")
 class Integrator(Transform):
+    allow_random = False
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         assert self.sr is not None, "sr is required for %s"%(type(self).__name__)
     def apply(self, x):
         return integrate(x, self.sr)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import LFilterModule
+        alpha = 1 / (1 + 1 / self.sr * 2 * torch.pi * 10)
+        return LFilterModule(torch.Tensor([alpha**2, -alpha**2, 0]), torch.Tensor([1, -2 * alpha, alpha**2]))
 
 
 @gin.configurable(module="ad.transforms")
@@ -492,6 +527,7 @@ class CompressRange(Transform):
         mode (str): loudness measure ("lufs", "db" or "dba"). Defaults to "lufs".
         sr (int): sampling rate. Defaults to 44100.
     """
+    allow_random = False
     takes_as_input = Transform.input_types.torch
 
     def __init__(self, target_range: Tuple[float, float] = (-30., -14.), input_range: Tuple[float, float] | None = None,
@@ -576,6 +612,7 @@ class NormRange(Transform):
         max_value (float): target peak. Defaults to 1.
         boost (bool): also scale up inputs whose peak is below max_value. Defaults to True.
     """
+    allow_random = False
     takes_as_input = Transform.input_types.torch
 
     def __init__(self, max_value: float = 1., boost: bool = True, **kwargs):
@@ -592,3 +629,7 @@ class NormRange(Transform):
         if not self.boost:
             scale = scale.clamp(max=1.)
         return (x_flat * scale).reshape(shape)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import NormRangeModule
+        return NormRangeModule(self.max_value, self.boost)

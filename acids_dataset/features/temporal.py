@@ -21,6 +21,10 @@ class RMS(_ChannelFeature):
         rms = torch.sqrt(_frames(x, self.frame_length, self.hop_length).square().mean(-1))
         return (20 * torch.log10(rms + _EPS)).clamp(min=self.min_db) if self.db else rms
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import RMSModule
+        return RMSModule(self.frame_length, self.hop_length, self.db, self.min_db, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class ZeroCrossingRate(_ChannelFeature):
@@ -40,6 +44,10 @@ class ZeroCrossingRate(_ChannelFeature):
         signs = torch.sign(frames)
         crossings = (signs[..., 1:] * signs[..., :-1] < 0).float().mean(-1)
         return crossings * self.sr / 2 if self.unit == "hz" else crossings
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import ZeroCrossingRateModule
+        return ZeroCrossingRateModule(self.frame_length, self.hop_length, self.unit, self.keep_channels, self.sr)
 
 
 class _EnvelopeFeature(_ChannelFeature):
@@ -77,6 +85,10 @@ class AttackTime(_EnvelopeFeature):
         attack = (end - start).clamp(min=0).float() * self.hop_length / self.sr
         return torch.where(peak_value > _EPS, attack, torch.zeros_like(attack))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import AttackTimeModule
+        return AttackTimeModule(self.frame_length, self.low, self.high, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class TemporalCentroid(_EnvelopeFeature):
@@ -89,6 +101,10 @@ class TemporalCentroid(_EnvelopeFeature):
         times = (torch.arange(env.shape[-1], device=env.device, dtype=env.dtype) + 0.5) * self.hop_length / self.sr
         total = env.sum(-1)
         return torch.where(total > _EPS, (env * times).sum(-1) / total.clamp(min=_EPS), torch.zeros_like(total))
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import TemporalCentroidModule
+        return TemporalCentroidModule(self.frame_length, self.keep_channels, self.sr)
 
 
 @gin.configurable(module="ad.features")
@@ -107,6 +123,10 @@ class CrestFactor(_ChannelFeature):
         peak, rms = x.abs().amax(-1), torch.sqrt(x.square().mean(-1))
         crest = torch.where(rms > _EPS, peak / rms.clamp(min=_EPS), torch.zeros_like(rms))
         return 20 * torch.log10(crest + _EPS) if self.db else crest
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import CrestFactorModule
+        return CrestFactorModule(self.db, self.keep_channels, self.sr)
 
 
 __all__ = ['RMS', 'ZeroCrossingRate', 'AttackTime', 'TemporalCentroid', 'CrestFactor']

@@ -37,6 +37,10 @@ class SpectralCentroid(_UnitFeature):
         _, centroid, _, active = _moments(power, freqs)
         return torch.where(active, convert_frequency(centroid, self.unit, self.sr), torch.zeros_like(centroid))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralMomentModule
+        return SpectralMomentModule("centroid", self.frame_length, self.hop_length, self.unit, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class SpectralSpread(_UnitFeature):
@@ -51,6 +55,10 @@ class SpectralSpread(_UnitFeature):
         _, _, spread, active = _moments(power, freqs)
         return torch.where(active, convert_frequency(spread, self.unit, self.sr), torch.zeros_like(spread))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralMomentModule
+        return SpectralMomentModule("spread", self.frame_length, self.hop_length, self.unit, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class SpectralSkewness(_SpectralFeature):
@@ -64,6 +72,10 @@ class SpectralSkewness(_SpectralFeature):
         skewness = (p * (freqs - centroid[..., None]) ** 3).sum(-1) / spread.clamp(min=_EPS) ** 3
         return torch.where(active & (spread > _EPS), skewness, torch.zeros_like(skewness))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralMomentModule
+        return SpectralMomentModule("skewness", self.frame_length, self.hop_length, "hz", self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class SpectralKurtosis(_SpectralFeature):
@@ -76,6 +88,10 @@ class SpectralKurtosis(_SpectralFeature):
         p, centroid, spread, active = _moments(power, freqs)
         kurtosis = (p * (freqs - centroid[..., None]) ** 4).sum(-1) / spread.clamp(min=_EPS) ** 4
         return torch.where(active & (spread > _EPS), kurtosis, torch.zeros_like(kurtosis))
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralMomentModule
+        return SpectralMomentModule("kurtosis", self.frame_length, self.hop_length, "hz", self.keep_channels, self.sr)
 
 
 @gin.configurable(module="ad.features")
@@ -98,6 +114,10 @@ class SpectralRolloff(_UnitFeature):
         rolloff = freqs[index]
         return torch.where(total[..., 0] > _EPS, convert_frequency(rolloff, self.unit, self.sr), torch.zeros_like(rolloff))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralRolloffModule
+        return SpectralRolloffModule(self.frame_length, self.hop_length, self.percentile, self.unit, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class SpectralFlatness(_SpectralFeature):
@@ -118,6 +138,10 @@ class SpectralFlatness(_SpectralFeature):
         flatness = torch.where(mean > _EPS, (geometric / mean.clamp(min=_EPS)).clamp(max=1.), torch.zeros_like(mean))
         return 10 * torch.log10(flatness + _EPS) if self.db else flatness
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralFlatnessModule
+        return SpectralFlatnessModule(self.frame_length, self.hop_length, self.db, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class SpectralCrest(_SpectralFeature):
@@ -129,6 +153,10 @@ class SpectralCrest(_SpectralFeature):
         power, _ = self.power_spectrum(x)
         mean = power.mean(-1)
         return torch.where(mean > _EPS, power.max(-1).values / mean.clamp(min=_EPS), torch.zeros_like(mean))
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralCrestModule
+        return SpectralCrestModule(self.frame_length, self.hop_length, self.keep_channels, self.sr)
 
 
 @gin.configurable(module="ad.features")
@@ -145,6 +173,10 @@ class SpectralFlux(_SpectralFeature):
         diff = (magnitude[..., 1:, :] - magnitude[..., :-1, :]).clamp(min=0)
         flux = diff.norm(dim=-1)
         return torch.cat([flux.new_zeros(flux.shape[:-1] + (1,)), flux], dim=-1)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralFluxModule
+        return SpectralFluxModule(self.frame_length, self.hop_length, self.keep_channels, self.sr)
 
 
 @gin.configurable(module="ad.features")
@@ -176,6 +208,10 @@ class SpectralContrast(_SpectralFeature):
             valley, peak = sorted_band[..., :n].mean(-1), sorted_band[..., -n:].mean(-1)
             contrasts.append(10 * torch.log10(peak + _EPS) - 10 * torch.log10(valley + _EPS))
         return torch.stack(contrasts, dim=-2)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import SpectralContrastModule
+        return SpectralContrastModule(self.frame_length, self.hop_length, self.n_bands, self.fmin, self.quantile, self.keep_channels, self.sr)
 
 
 __all__ = ['SpectralCentroid', 'SpectralSpread', 'SpectralSkewness', 'SpectralKurtosis', 'SpectralRolloff', 'SpectralFlatness',

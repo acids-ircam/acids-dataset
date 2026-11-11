@@ -96,6 +96,10 @@ class PQMF(_WaveformFeature):
         x = _as_tensor(data)
         return self.synthesis(x) if self.inverse else self.analysis(x)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import PQMFModule
+        return PQMFModule(self.filters, self.inverse)
+
     def invert(self, features, length: int | None = None) -> torch.Tensor:
         """signals (..., C, T) from sub-bands (..., C * n_bands, T'), cropped or zero-padded to length samples if given
         (signals are zero-padded to a multiple of n_bands by the analysis) ; sub-bands from signals with inverse=True."""

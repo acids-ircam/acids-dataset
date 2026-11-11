@@ -99,6 +99,12 @@ class AcidsDatasetFeature(object):
         otherwise."""
         raise NotImplementedError("%s is not invertible"%type(self).__name__)
 
+    def nn_module(self, **kwargs) -> torch.nn.Module:
+        """TorchScript-compatible torch.nn.Module computing the feature from audio (forward), with an invert method for
+        invertible features. Raises a NotImplementedError for features without module (e.g. numpy / librosa based
+        features)."""
+        raise NotImplementedError("%s has no nn_module"%type(self).__name__)
+
     def _sample(self, pos: int | float | None, sr: int):
         if isinstance(pos, float):
             return int(pos * sr)

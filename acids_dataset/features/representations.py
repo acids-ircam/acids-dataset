@@ -76,6 +76,11 @@ class DCT(_RepresentationFeature):
             x = x.squeeze(-2)
         return _fit_length(x, length)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import DCTModule
+        return DCTModule(self.frame_length, self.hop_length, dct_matrix(self.n_coeffs, self.frame_length), self.window,
+                         self.keep_channels, self.sr)
+
 
 def hz_to_erb_rate(f):
     """ERB-rate scale of Glasberg & Moore (1990) : number of ERBs below the frequency f (Hz)."""
@@ -129,6 +134,10 @@ class Gammatone(_RepresentationFeature):
         bands = (power @ self.weights.to(power).T).transpose(-2, -1)
         return 10 * torch.log10(bands + _EPS) if self.db else bands
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import GammatoneModule
+        return GammatoneModule(self.frame_length, self.hop_length, self.weights, self.db, self.window, self.keep_channels, self.sr)
+
 
 @gin.configurable(module="ad.features")
 class Cepstrum(_RepresentationFeature):
@@ -156,6 +165,10 @@ class Cepstrum(_RepresentationFeature):
         log_magnitude = torch.log(torch.fft.rfft(frames, dim=-1).abs() + _EPS)
         cepstrum = torch.fft.irfft(log_magnitude, n=self.frame_length, dim=-1)
         return cepstrum[..., :self.n_coeffs].transpose(-2, -1)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import CepstrumModule
+        return CepstrumModule(self.frame_length, self.hop_length, self.n_coeffs, self.window, self.keep_channels, self.sr)
 
 
 SPECTRUM_MODES = ["complex", "magnitude", "power", "db", "phase", "real", "imaginary", "power_density",
@@ -406,6 +419,10 @@ class STFT(_RepresentationFeature):
     def script(self) -> STFTModule:
         """TorchScript-compatible module (torch.jit.script) computing the feature (forward) and inverting it (invert)."""
         return self._build_module()
+
+    def nn_module(self, **kwargs) -> STFTModule:
+        """same as script()."""
+        return self.script()
 
     def streaming(self) -> STFTStreamingModule:
         """TorchScript-compatible module computing the feature on chunks of audio (..., C, T), T a multiple of

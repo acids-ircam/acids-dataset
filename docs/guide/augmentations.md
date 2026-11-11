@@ -7,12 +7,12 @@ Stochastic options of the base class are very powerful to develop versatile augm
 ```python
 from acids_dataset import transforms as atf
 
-pipeline = atf.Compose([
+pipeline = atf.Compose(
   atf.Stretch(131072, p=0.2), # Stretch is always non-batchwise, as output lengths depend on the random factor
   atf.Gain(p=0.8), 
   atf.Compress(p=0.5), 
   atf.Mute(p=0.1), 
-])
+)
 ```
 
 performs random resampling (speed and pitch change) with probability 20%, random gain with probability 80%, random compression with probability 50%, and mutes random batches with probability 10% (very useful to force models to learn silence). 
@@ -64,7 +64,7 @@ atf.NormRange(max_value=0.9, boost=False)                                  # onl
 
 ## Spatial transforms
 
-`MidSide`, `AmbisonicEncoder` and `AmbisonicDecoder` (`acids_dataset.transforms`) change the channels of multichannel signals, `(..., C, T)` : they are deterministic (`p` is ignored), and can be used as dataset transforms, in `sample_features`, or called on tensors and arrays. They are invertible (`invertible = True`) : `invert` gives inputs back, as for [invertible features](features.md#inverting-features). Their default names are `midside` (`leftright` with `inverse=True`), `ambisonics` and `ambisonics_decoded`.
+`MidSide`, `AmbisonicEncoder` and `AmbisonicDecoder` (`acids_dataset.transforms`) change the channels of multichannel signals, `(..., C, T)` : they are deterministic (giving `p` raises an `AcidsTransformException`, see [Deterministic transforms](#deterministic-transforms)), and can be used as dataset transforms, in `sample_features`, or called on tensors and arrays. They are invertible (`invertible = True`) : `invert` gives inputs back, as for [invertible features](features.md#inverting-features). Their default names are `midside` (`leftright` with `inverse=True`), `ambisonics` and `ambisonics_decoded`.
 
 ```python
 from acids_dataset import transforms as atf
@@ -104,7 +104,56 @@ With `layout=None`, `encoder.invert` infers the number of channels from signals 
 
 Decoders often have more loudspeakers than ambisonic channels : `AmbisonicEncoder(strict=False)` then encodes channels that cannot be encoded invertibly at a fixed order (sources are mixed in ambisonic signals), instead of raising a `ValueError`.
 
-For a full table of available transfroms, see at the [end](#full-augmentation-table) of `README.md`. 
+## Deterministic transforms
+
+Transforms that are not augmentations (`allow_random = False`) cannot be given a probability : `p` must be `None`, and other values raise an `AcidsTransformException` at initialization. They are always applied. This concerns `MidSide`, `AmbisonicEncoder`, `AmbisonicDecoder`, `Resample` and `Normalize` (of `acids_dataset.transforms.misc`), `PreEmphasis`, `Log1p`, `Exp1m`, `Derivator`, `Integrator`, `CompressRange`, `NormRange` and `BasicPitch`.
+
+```python
+atf.Log1p(p=0.5)     # AcidsTransformException : Log1p is not a probabilistic transform
+atf.Log1p()          # always applied
+```
+
+!!! note
+    `Log1p` and `Exp1m` used to be given `p=1.0` by default ; configurations or code giving them `p` must remove it.
+
+## TorchScript modules
+
+`transform.nn_module()` gives a `torch.nn.Module` applying the transform, compatible with `torch.jit.script` (e.g. to embed a pre-processing pipeline in an exported model). Modules are deterministic : the probability `p` of random transforms is not used. Modules of invertible transforms (`MidSide`, `AmbisonicEncoder`, `AmbisonicDecoder`) also have an `invert` method, exported to TorchScript. `Compose.nn_module()` gives a module applying the modules of its transforms sequentially.
+
+| Transform | Module |
+| --------- | ------ |
+| `MidSide` | `MidSideModule`, with `invert` |
+| `AmbisonicEncoder`, `AmbisonicDecoder` | `ChannelMatrixModule` (encoding / decoding matrix), with `invert`. The number of channels must be fixed : give `nn_module(n_channels=...)` for encoders without `layout`, and for decoders with `order="adaptive"` (otherwise a `ValueError` is raised) |
+| `Resample` (`transforms.misc`) | `torchaudio.transforms.Resample` |
+| `PreEmphasis` | `PreEmphasisModule` |
+| `Log1p`, `Exp1m` | `Log1pModule`, `Exp1mModule` |
+| `Normalize` (`transforms.misc`) | `NormalizeModule` (peak normalization to 0 dBFS, at most +30 dB) |
+| `Derivator`, `Integrator` | `LFilterModule` (IIR filter) |
+| `NormRange` | `NormRangeModule` |
+| `Compose` | `ComposeModule` |
+
+Random augmentations (`Gain`, `Stretch`, `RandomDelay`, `AddNoise`, audiomentations transforms, ...) and numpy-based transforms raise a `NotImplementedError`.
+
+!!! warning
+    `acids_dataset.transforms.Normalize` and `acids_dataset.transforms.Resample` are the [audiomentations](https://github.com/iver56/audiomentations) transforms, that have no module : the scriptable versions are `acids_dataset.transforms.misc.Normalize` and `acids_dataset.transforms.misc.Resample`.
+
+```python
+import torch
+from acids_dataset import transforms as atf
+from acids_dataset.transforms.misc import Normalize
+
+x = torch.randn(4, 2, 44100)
+pipeline = torch.jit.script(atf.Compose(atf.PreEmphasis(), Normalize()).nn_module())
+y = pipeline(x)
+
+encoder = torch.jit.script(atf.AmbisonicEncoder().nn_module(n_channels=2))   # stereo -> first order ambisonics
+assert torch.allclose(encoder.invert(encoder(x)), x, atol=1e-5)
+torch.jit.save(encoder, "encoder.ts")
+```
+
+Features have modules as well (see [TorchScript modules of features](features.md#torchscript-modules)).
+
+For a full table of available transforms, see the [end](#full-augmentation-table) of this page.
 
 ## Full augmentation table
 

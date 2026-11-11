@@ -49,5 +49,14 @@ class MidSide(Transform):
         """left / right signals from mid / side signals (..., 2, T) (mid / side signals with inverse=True)."""
         return MidSide(normalization=self.normalization, inverse=not self.inverse, sr=self.sr).apply(data)
 
+    def _scale(self, inverse: bool) -> float:
+        if self.normalization == "orthonormal":
+            return 2 ** -0.5
+        return 1. if inverse else 0.5
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import MidSideModule
+        return MidSideModule(self._scale(self.inverse), self._scale(not self.inverse))
+
 
 __all__ = ['MidSide']

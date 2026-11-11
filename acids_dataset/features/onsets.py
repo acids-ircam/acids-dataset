@@ -33,6 +33,10 @@ class OnsetStrength(_OnsetFeature):
     def compute(self, x):
         return self.onset_strength(x)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import OnsetStrengthModule
+        return OnsetStrengthModule(self.frame_length, self.hop_length, self.keep_channels, self.sr)
+
 
 def _peaks(strength: torch.Tensor, threshold: float, min_distance: int) -> torch.Tensor:
     """boolean mask of local maxima above an adaptive threshold (mean + threshold * std of the chunk), separated by at
@@ -63,6 +67,10 @@ class OnsetRate(_OnsetFeature):
         peaks = _peaks(strength, self.threshold, max(1, int(round(self.min_interval * self.frame_rate))))
         duration = x.shape[-1] / self.sr
         return peaks.float().sum(-1) / max(duration, _EPS)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import OnsetRateModule
+        return OnsetRateModule(self.frame_length, self.hop_length, self.threshold, self.min_interval, self.keep_channels, self.sr)
 
 
 @gin.configurable(module="ad.features")
@@ -102,6 +110,10 @@ class Tempo(_OnsetFeature):
         offset = torch.where(denominator.abs() > _EPS, 0.5 * (left - right) / denominator, torch.zeros_like(center)).clamp(-0.5, 0.5)
         tempo = 60 * self.frame_rate / (best.to(x.dtype) + offset).clamp(min=1)
         return torch.where(valid.any(-1) & (acf[..., 0] > _EPS), tempo, torch.zeros_like(tempo))
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import TempoModule
+        return TempoModule(self.frame_length, self.hop_length, self.min_bpm, self.max_bpm, self.prior_bpm, self.prior_width, self.keep_channels, self.sr)
 
 
 __all__ = ['OnsetStrength', 'OnsetRate', 'Tempo']

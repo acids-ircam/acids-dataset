@@ -27,8 +27,8 @@ HOP_LENGTH = 22050
 Loudness:
     sr = %SAMPLE_RATE
 
-features.parse_features:
-    features = [@features.Loudness]
+ad.features.parse_features:
+    features = [@ad.features.Loudness]
 
 OnlineAudioDataset:
     batch_by = "files"

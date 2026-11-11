@@ -149,7 +149,7 @@ dataset = AudioDataset("path/to/microphone/array", sr=48000, chunk_length=2., fe
 
   `STFT` is computed with [acids_transforms](https://github.com/acids-ircam/acids_transforms), and can be inverted, scripted and streamed for real-time use :
     - `feature.invert(features, inversion_mode=None, length=None)` gives back audio (`(..., T)` for the mix of channels, `(..., C, T)` with `keep_channels`, cropped or zero-padded to `length`) : exactly from `"complex"`, (`"real"`, `"imaginary"`) or a magnitude (`"magnitude"`, `"power"`, `"db"`, `"power_density"`) with `"phase"` ; approximately with instantaneous phases or frequencies ; and from magnitudes only with `inversion_mode` (`"griffin_lim"` by default, `"random"`, `"keep_input"` or `"sinebank"`).
-    - `feature.script()` gives a module for `torch.jit.script`, with `forward` (the feature) and `invert`.
+    - `feature.script()` (or `feature.nn_module()`, see [TorchScript modules](#torchscript-modules)) gives a module for `torch.jit.script`, with `forward` (the feature) and `invert`.
     - `feature.streaming()` gives a scriptable module computing the feature on chunks of audio `(..., C, T)` (`T` a multiple of `hop_length`) : each chunk gives its `T // hop_length` frames, that are the ones of the feature with `center=False` (after `frame_length // hop_length - 1` frames containing the initial zeros of the stream). `invert` gives back chunks of audio, delayed by `latency = frame_length - hop_length` samples ; call `reset()` between streams.
 
   ```python
@@ -206,6 +206,38 @@ assert torch.allclose(dct.invert(dct(x), length=44100)[..., :44032], x[..., :440
 fft = FFT(mode="complex", keep_channels=True)
 assert torch.allclose(fft.invert(fft(x), length=44100), x, atol=1e-4)
 ```
+
+## TorchScript modules
+
+`feature.nn_module()` gives a `torch.nn.Module` computing the feature from audio `(..., C, T)` with the parameters of the feature. The module is compatible with `torch.jit.script`, so it can be embedded in exported models (e.g. to compute descriptors inside a TorchScript model at inference time) or saved with `torch.jit.save`. It gives the same outputs as the feature, with the same channel handling (mix of channels, or each channel with `keep_channels=True`). Modules of invertible features also have an `invert` method, exported to TorchScript. Features without module raise a `NotImplementedError`.
+
+| Family | Features with `nn_module` | `invert` |
+| ------ | ------------------------- | -------- |
+| Temporal | `RMS`, `ZeroCrossingRate`, `AttackTime`, `TemporalCentroid`, `CrestFactor` | |
+| Spectral | `SpectralCentroid`, `SpectralSpread`, `SpectralSkewness`, `SpectralKurtosis`, `SpectralRolloff`, `SpectralFlatness`, `SpectralCrest`, `SpectralFlux`, `SpectralContrast` | |
+| Onsets and rhythm | `OnsetStrength`, `OnsetRate`, `Tempo` | |
+| Harmonic | `Chroma`, `Harmonicity`, `Inharmonicity` | |
+| Quality | `ClippingRatio`, `Peak`, `DCOffset`, `DynamicRange`, `SilenceRatio` | |
+| Representations | `STFT` (same as `script()`), `DCT`, `Gammatone`, `Cepstrum`, `PQMF` | `STFT`, `DCT` : `invert(y, length=None)` ; `PQMF` |
+| Loudness and spectrograms | `Loudness` (same as `script()`), `Mel` (a copy of its `torchaudio` `MelSpectrogram`) | |
+
+Other features (`DGT`, `FFT`, `LPC`, `CQT`, `F0` / `Pitch`, spatial descriptors, `LoudnessMeter`, `BeatTrack`, MIDI, regexp and module embeddings) rely on numpy, librosa or external models and have no module. Transforms have modules as well (see [TorchScript modules of transforms](augmentations.md#torchscript-modules)).
+
+```python
+import torch
+from acids_dataset import features as F
+
+x = torch.randn(4, 2, 44100)
+rms = F.RMS(keep_channels=True)
+module = torch.jit.script(rms.nn_module())
+assert torch.allclose(module(x), rms(x), atol=1e-4)
+
+dct = torch.jit.script(F.DCT(frame_length=1024, window=None, keep_channels=True).nn_module())
+audio = dct.invert(dct(x), 44100)                       # inversion, also in TorchScript
+torch.jit.save(dct, "dct.ts")
+```
+
+New feature modules can subclass `acids_dataset.features.FeatureModule`, that mixes channels (or not, with `keep_channels`) and frames signals, and implement `compute` (see [Implementing features](extending.md#implementing-features)).
 
 ## Neural embeddings in online mode
 

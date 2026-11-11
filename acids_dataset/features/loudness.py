@@ -9,7 +9,7 @@ from .base import AcidsDatasetFeature
 from ..utils import loudness, frame_with_pad, level, LOUDNESS_MODES
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Loudness(AcidsDatasetFeature):
     supports_batch = True
     def __init__(
@@ -68,6 +68,10 @@ class Loudness(AcidsDatasetFeature):
         if min_loudness is not None:
             data_loudness = data_loudness.clamp(min=min_loudness)
         return data_loudness
+
+    def nn_module(self, **kwargs):
+        """same as script()."""
+        return self.script()
 
     def script(self):
         return LoudnessScript(frame_length=self.frame_length, sr=self.sr, keep_channels=self.keep_channels, min_loudness=getattr(self, "min_loudness", None),

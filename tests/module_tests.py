@@ -13,7 +13,7 @@ def check_scripted_version(module):
         module_scripted = torch.jit.script(module())
         torch.jit.save(module_scripted, str(scripted_paths / module.scripted_name))
 
-@gin.configurable(module="test")
+@gin.configurable(module="ad.test")
 class ConvEmbedding(nn.Module):
     scripted_name = "conv_embedding.ts"
     def __init__(self):

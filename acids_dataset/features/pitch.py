@@ -42,8 +42,8 @@ pyin_config = """
 """
 
 _post_config = """
-features.parse_features:
-    features = @features.{{NAME}}
+ad.features.parse_features:
+    features = @ad.features.{{NAME}}
 """
 
 _configs = {
@@ -121,7 +121,7 @@ def _reframe_pitch_out(f0_array: np.ndarray | torch.Tensor, audio_array: np.ndar
         raise TypeError(type(f0_array))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class F0(AcidsDatasetFeature):
     _valid_modes_ = _AD_F0_METHODS
     supports_batch = True
@@ -337,7 +337,7 @@ def f0_to_pitch(x):
     return x
     
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Pitch(F0): 
     
     def __repr__(self):

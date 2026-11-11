@@ -6,7 +6,7 @@ import torch
 from .framed import _EPS, _frames, _ChannelFeature
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class RMS(_ChannelFeature):
     """root mean square energy per frame, in dB (floored to min_db) or linear (db=False)."""
     def __init__(self, frame_length: int = 2048, hop_length: int | None = None, db: bool = True, min_db: float = -100.,
@@ -21,8 +21,12 @@ class RMS(_ChannelFeature):
         rms = torch.sqrt(_frames(x, self.frame_length, self.hop_length).square().mean(-1))
         return (20 * torch.log10(rms + _EPS)).clamp(min=self.min_db) if self.db else rms
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import RMSModule
+        return RMSModule(self.frame_length, self.hop_length, self.db, self.min_db, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class ZeroCrossingRate(_ChannelFeature):
     """sign changes per frame, as a ratio of samples (unit="ratio"), or as a frequency (unit="hz" : the frequency of a sine
     with the same rate)."""
@@ -41,6 +45,10 @@ class ZeroCrossingRate(_ChannelFeature):
         crossings = (signs[..., 1:] * signs[..., :-1] < 0).float().mean(-1)
         return crossings * self.sr / 2 if self.unit == "hz" else crossings
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import ZeroCrossingRateModule
+        return ZeroCrossingRateModule(self.frame_length, self.hop_length, self.unit, self.keep_channels, self.sr)
+
 
 class _EnvelopeFeature(_ChannelFeature):
     """descriptors of the RMS envelope of a whole chunk (envelope frames of envelope_length samples), output (...,) or
@@ -54,7 +62,7 @@ class _EnvelopeFeature(_ChannelFeature):
         return torch.sqrt(_frames(x, self.frame_length, self.hop_length).square().mean(-1))
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class AttackTime(_EnvelopeFeature):
     """time (seconds) for the envelope of a chunk to rise from low (10%) to high (90%) of its maximum, before the maximum."""
     def __init__(self, envelope_length: int = 256, low: float = 0.1, high: float = 0.9, keep_channels: bool = False, sr: int = 44100, **kwargs):
@@ -77,8 +85,12 @@ class AttackTime(_EnvelopeFeature):
         attack = (end - start).clamp(min=0).float() * self.hop_length / self.sr
         return torch.where(peak_value > _EPS, attack, torch.zeros_like(attack))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import AttackTimeModule
+        return AttackTimeModule(self.frame_length, self.low, self.high, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class TemporalCentroid(_EnvelopeFeature):
     """center of mass of the envelope of a chunk, in seconds."""
     @property
@@ -90,8 +102,12 @@ class TemporalCentroid(_EnvelopeFeature):
         total = env.sum(-1)
         return torch.where(total > _EPS, (env * times).sum(-1) / total.clamp(min=_EPS), torch.zeros_like(total))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import TemporalCentroidModule
+        return TemporalCentroidModule(self.frame_length, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class CrestFactor(_ChannelFeature):
     """peak / RMS ratio of a chunk, in dB (db=True) or linear."""
     _channel_axis = -1
@@ -107,6 +123,10 @@ class CrestFactor(_ChannelFeature):
         peak, rms = x.abs().amax(-1), torch.sqrt(x.square().mean(-1))
         crest = torch.where(rms > _EPS, peak / rms.clamp(min=_EPS), torch.zeros_like(rms))
         return 20 * torch.log10(crest + _EPS) if self.db else crest
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import CrestFactorModule
+        return CrestFactorModule(self.db, self.keep_channels, self.sr)
 
 
 __all__ = ['RMS', 'ZeroCrossingRate', 'AttackTime', 'TemporalCentroid', 'CrestFactor']

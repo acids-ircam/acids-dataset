@@ -6,7 +6,7 @@ from .base import AcidsDatasetFeature, FileHash
 
 Audio2Beats = None
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class BeatTrack(AcidsDatasetFeature):
     def __init__(self, 
                  sr=None,

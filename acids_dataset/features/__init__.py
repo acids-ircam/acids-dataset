@@ -20,6 +20,7 @@ from .quality import *
 from .representations import STFT, DGT, FFT, DCT, Gammatone, Cepstrum
 from .pqmf import PQMF
 from .lpc import LPC
+from .nn_modules import *
 
 # advanced operations
 from .clustering import hash_from_clustering

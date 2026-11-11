@@ -61,7 +61,7 @@ def line_spectral_frequencies(a: torch.Tensor) -> torch.Tensor:
     return lsf.sort(dim=-1).values
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class LPC(_ChannelFeature):
     """Linear predictive coding of windowed frames (autocorrelation method, Levinson-Durbin recursion), with a
     prediction polynomial A(z) = 1 + a_1 z^-1 + ... + a_p z^-p of order p (x[n] ~ -sum_k a_k x[n - k]).

@@ -68,7 +68,7 @@ def crop_midi(midi_data, tstart, tend, length):
     return midi_data
 
 
-@gin.configurable(module="features", denylist=AcidsDatasetFeature.denylist)
+@gin.configurable(module="ad.features", denylist=AcidsDatasetFeature.denylist)
 class AfterMIDI(AcidsDatasetFeature):
     # dictionary of BasicPitch instances, referenced by devices, shared across instances.
     bp = {} 

@@ -14,7 +14,7 @@ class _ChunkFeature(_ChannelFeature):
     _channel_axis = -1
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class ClippingRatio(_ChunkFeature):
     """ratio of samples whose absolute value reaches threshold (clipped samples)."""
     def __init__(self, threshold: float = 0.999, keep_channels: bool = False, sr: int = 44100, **kwargs):
@@ -33,8 +33,12 @@ class ClippingRatio(_ChunkFeature):
         ratio = (x.abs() >= self.threshold).float().mean(-1)
         return ratio if self.keep_channels else ratio.mean(-1, keepdim=True)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import ClippingRatioModule
+        return ClippingRatioModule(self.threshold, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class Peak(_ChunkFeature):
     """maximum absolute amplitude of a chunk, linear (db=False) or in dBFS (db=True) : of each channel with keep_channels,
     the maximum over channels otherwise (peaks are measured on channels, as mixes would hide them)."""
@@ -55,8 +59,12 @@ class Peak(_ChunkFeature):
             peak = peak.amax(-1, keepdim=True)
         return 20 * torch.log10(peak + _EPS) if self.db else peak
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import PeakModule
+        return PeakModule(self.db, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class DCOffset(_ChunkFeature):
     """mean value of the signal (of each channel with keep_channels, of the mix otherwise)."""
     def __init__(self, keep_channels: bool = True, sr: int = 44100, **kwargs):
@@ -68,8 +76,12 @@ class DCOffset(_ChunkFeature):
     def compute(self, x):
         return x.mean(-1)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import DCOffsetModule
+        return DCOffsetModule(self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class DynamicRange(_ChunkFeature):
     """difference (dB) between the high and low percentiles of the RMS of frames of a chunk, ignoring frames quieter than
     silence_db."""
@@ -88,8 +100,12 @@ class DynamicRange(_ChunkFeature):
         high, low = torch.nanquantile(masked, self.high, dim=-1), torch.nanquantile(masked, self.low, dim=-1)
         return torch.where(active.any(-1), high - low, torch.zeros_like(high))
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import DynamicRangeModule
+        return DynamicRangeModule(self.frame_length, self.hop_length, self.low, self.high, self.silence_db, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class SilenceRatio(_ChunkFeature):
     """ratio of frames whose RMS is below threshold_db."""
     def __init__(self, frame_length: int = 2048, hop_length: int | None = None, threshold_db: float = -60., keep_channels: bool = False,
@@ -104,8 +120,12 @@ class SilenceRatio(_ChunkFeature):
         rms_db = 20 * torch.log10(torch.sqrt(_frames(x, self.frame_length, self.hop_length).square().mean(-1)) + _EPS)
         return (rms_db < self.threshold_db).float().mean(-1)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import SilenceRatioModule
+        return SilenceRatioModule(self.frame_length, self.hop_length, self.threshold_db, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class LoudnessMeter(_ChunkFeature):
     """loudness statistics of a chunk, computed on the levels of its frames : RMS level in dBFS (db), A-weighted RMS
     level in dB(A) (dba, IEC 61672 weighting, 0 dB at 1 kHz), and loudness in LUFS (lufs, ITU-R BS.1770 K-weighting,

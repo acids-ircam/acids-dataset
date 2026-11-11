@@ -6,7 +6,7 @@ import torch
 from .base import Transform
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class MidSide(Transform):
     """Mid / side transform of stereo signals : (..., 2, T) -> (..., 2, T), mid first. Raises a ValueError if inputs do
     not have 2 channels.
@@ -48,6 +48,15 @@ class MidSide(Transform):
     def invert(self, data) -> torch.Tensor:
         """left / right signals from mid / side signals (..., 2, T) (mid / side signals with inverse=True)."""
         return MidSide(normalization=self.normalization, inverse=not self.inverse, sr=self.sr).apply(data)
+
+    def _scale(self, inverse: bool) -> float:
+        if self.normalization == "orthonormal":
+            return 2 ** -0.5
+        return 1. if inverse else 0.5
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import MidSideModule
+        return MidSideModule(self._scale(self.inverse), self._scale(not self.inverse))
 
 
 __all__ = ['MidSide']

@@ -4,12 +4,12 @@ features/ModuleEmbedding:
     module_path = "tests/scripted/conv_embedding.ts"
     method = "get_embedding"
     transforms = [
-        @transforms.Gain, 
-        @transforms.PitchShift
+        @ad.transforms.Gain, 
+        @ad.transforms.PitchShift
     ]
     sr = %SAMPLE_RATE
 
 parse_features:
-    features = [@features/features.ModuleEmbedding]
+    features = [@features/ad.features.ModuleEmbedding]
     device = %DEVICE
 

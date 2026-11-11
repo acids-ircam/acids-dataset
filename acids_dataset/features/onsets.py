@@ -24,7 +24,7 @@ class _OnsetFeature(_SpectralFeature):
         return self.sr / self.hop_length
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class OnsetStrength(_OnsetFeature):
     """onset strength per frame (rectified spectral flux of log-magnitude spectra)."""
     @property
@@ -32,6 +32,10 @@ class OnsetStrength(_OnsetFeature):
 
     def compute(self, x):
         return self.onset_strength(x)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import OnsetStrengthModule
+        return OnsetStrengthModule(self.frame_length, self.hop_length, self.keep_channels, self.sr)
 
 
 def _peaks(strength: torch.Tensor, threshold: float, min_distance: int) -> torch.Tensor:
@@ -44,7 +48,7 @@ def _peaks(strength: torch.Tensor, threshold: float, min_distance: int) -> torch
     return is_max & (strength > mean + threshold * std) & (strength > _EPS)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class OnsetRate(_OnsetFeature):
     """number of onsets per second in a chunk (peaks of onset strength above mean + threshold * std, separated by
     min_interval seconds)."""
@@ -64,8 +68,12 @@ class OnsetRate(_OnsetFeature):
         duration = x.shape[-1] / self.sr
         return peaks.float().sum(-1) / max(duration, _EPS)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import OnsetRateModule
+        return OnsetRateModule(self.frame_length, self.hop_length, self.threshold, self.min_interval, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class Tempo(_OnsetFeature):
     """tempo of a chunk (BPM) : lag of the maximum of the autocorrelation of onset strength between min_bpm and max_bpm,
     weighted by a log-normal prior around prior_bpm (that reduces octave errors) and refined by parabolic interpolation."""
@@ -102,6 +110,10 @@ class Tempo(_OnsetFeature):
         offset = torch.where(denominator.abs() > _EPS, 0.5 * (left - right) / denominator, torch.zeros_like(center)).clamp(-0.5, 0.5)
         tempo = 60 * self.frame_rate / (best.to(x.dtype) + offset).clamp(min=1)
         return torch.where(valid.any(-1) & (acf[..., 0] > _EPS), tempo, torch.zeros_like(tempo))
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import TempoModule
+        return TempoModule(self.frame_length, self.hop_length, self.min_bpm, self.max_bpm, self.prior_bpm, self.prior_width, self.keep_channels, self.sr)
 
 
 __all__ = ['OnsetStrength', 'OnsetRate', 'Tempo']

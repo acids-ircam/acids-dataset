@@ -26,5 +26,5 @@ OnlineAudioDataset:
     chunk_length = %CHUNK_LENGTH
 
 # features computed in both modes, e.g. 
-# features.parse_features:
-#     features = [@features.Loudness]
+# ad.features.parse_features:
+#     features = [@ad.features.Loudness]

@@ -28,7 +28,7 @@ PRECISION_TO_DTYPE = {
 }
 
 
-@gin.configurable(module="fragments")
+@gin.configurable(module="ad.fragments")
 class AcidsFragment(AudioFragment):
 
     _metadata_exclude_list = []

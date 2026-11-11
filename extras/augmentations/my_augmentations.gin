@@ -2,35 +2,35 @@
 # --- parameters of each transform ---
 
 # two RandomEQ with different parameters, distinguished by scopes
-eq_soft/transforms.RandomEQ:
+eq_soft/ad.transforms.RandomEQ:
     p = 0.8
     n_bp = 1
     sr = %SAMPLE_RATE
 
-eq_hard/transforms.RandomEQ:
+eq_hard/ad.transforms.RandomEQ:
     p = 0.2
     n_bp = 4
     sr = %SAMPLE_RATE
 
-transforms.AddGaussianSNR:
+ad.transforms.AddGaussianSNR:
     p = 0.5
     min_snr_db = 15.0
     max_snr_db = 40.0
     sr = %SAMPLE_RATE
 
-transforms.Gain.p = 0.8
-transforms.Gain.sr = %SAMPLE_RATE
-transforms.Mute.p = 0.1
-transforms.Mute.sr = %SAMPLE_RATE
+ad.transforms.Gain.p = 0.8
+ad.transforms.Gain.sr = %SAMPLE_RATE
+ad.transforms.Mute.p = 0.1
+ad.transforms.Mute.sr = %SAMPLE_RATE
 
 # --- pipeline (applied in this order) ---
 
-transforms.Compose.transforms = [
-    @eq_soft/transforms.RandomEQ(),
-    @eq_hard/transforms.RandomEQ(),
-    @transforms.AddGaussianSNR(),
-    @transforms.Gain(),
-    @transforms.Mute(),
+ad.transforms.Compose.transforms = [
+    @eq_soft/ad.transforms.RandomEQ(),
+    @eq_hard/ad.transforms.RandomEQ(),
+    @ad.transforms.AddGaussianSNR(),
+    @ad.transforms.Gain(),
+    @ad.transforms.Mute(),
 ]
 
-transforms.parse_transform.transform = @transforms.Compose
+ad.transforms.parse_transform.transform = @ad.transforms.Compose

@@ -30,7 +30,7 @@ def print_files(label):
         print(label, 'open files : ', len(os.listdir('/proc/self/fd')))
     return
 
-@gin.configurable(module="writer")
+@gin.configurable(module="ad.writer")
 class LMDBWriter(object):
     KeyGenerator = KeyIterator 
     _max_percent_for_db_size = 0.34

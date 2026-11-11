@@ -36,7 +36,7 @@ def pqmf_filters(n_bands: int, attenuation: float = 100., length: int | None = N
     return 2 * h * np.cos((2 * k + 1) * np.pi / (2 * n_bands) * t + (-1) ** k * np.pi / 4)
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class PQMF(_WaveformFeature):
     """Pseudo-QMF filter bank : splits signals (..., C, T) into n_bands critically sampled sub-bands
     (..., C * n_bands, ceil(T / n_bands)), bands of the first channel first ; signals are zero-padded to a multiple of
@@ -95,6 +95,10 @@ class PQMF(_WaveformFeature):
     def __call__(self, data) -> torch.Tensor:
         x = _as_tensor(data)
         return self.synthesis(x) if self.inverse else self.analysis(x)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import PQMFModule
+        return PQMFModule(self.filters, self.inverse)
 
     def invert(self, features, length: int | None = None) -> torch.Tensor:
         """signals (..., C, T) from sub-bands (..., C * n_bands, T'), cropped or zero-padded to length samples if given

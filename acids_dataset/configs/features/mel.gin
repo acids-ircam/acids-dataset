@@ -3,5 +3,5 @@ Mel:
 	device=%DEVICE
 	sr = %SAMPLE_RATE
 
-features.parse_features:
-    features = @features.Mel
+ad.features.parse_features:
+    features = @ad.features.Mel

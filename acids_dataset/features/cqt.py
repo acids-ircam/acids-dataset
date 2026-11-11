@@ -20,15 +20,15 @@ cqt_config = """
     pad_mode='constant'
     res_type='soxr_hq'
 
-features.parse_features:
-    feature = @features.{{NAME}}
+ad.features.parse_features:
+    feature = @ad.features.{{NAME}}
 """
 
 _configs = {
     "cqt": cqt_config
 }
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class CQT(AcidsDatasetFeature):
     def __init__(
             self, 

@@ -597,7 +597,7 @@ dataset = AudioDataset("path/to/microphone/array", sr=48000, chunk_length=2., fe
 
   `STFT` is computed with [acids_transforms](https://github.com/acids-ircam/acids_transforms), and can be inverted, scripted and streamed for real-time use :
     - `feature.invert(features, inversion_mode=None, length=None)` gives back audio (`(..., T)` for the mix of channels, `(..., C, T)` with `keep_channels`, cropped or zero-padded to `length`) : exactly from `"complex"`, (`"real"`, `"imaginary"`) or a magnitude (`"magnitude"`, `"power"`, `"db"`, `"power_density"`) with `"phase"` ; approximately with instantaneous phases or frequencies ; and from magnitudes only with `inversion_mode` (`"griffin_lim"` by default, `"random"`, `"keep_input"` or `"sinebank"`).
-    - `feature.script()` gives a module for `torch.jit.script`, with `forward` (the feature) and `invert`.
+    - `feature.script()` (or `feature.nn_module()`, see [TorchScript modules of features](#torchscript-modules-of-features)) gives a module for `torch.jit.script`, with `forward` (the feature) and `invert`.
     - `feature.streaming()` gives a scriptable module computing the feature on chunks of audio `(..., C, T)` (`T` a multiple of `hop_length`) : each chunk gives its `T // hop_length` frames, that are the ones of the feature with `center=False` (after `frame_length // hop_length - 1` frames containing the initial zeros of the stream). `invert` gives back chunks of audio, delayed by `latency = frame_length - hop_length` samples ; call `reset()` between streams.
 
   ```python
@@ -675,6 +675,38 @@ loader = dataset.get_loader(batch_size=32, batch_features=["z"], batch_transform
 
 All features compute batches at once (`supports_batch`), except `BeatTrack`, `AfterMIDI` and `RegexpFeature`, that are computed item by item (with the same results), as well as `ModuleEmbedding` with transforms.
 
+### TorchScript modules of features
+
+`feature.nn_module()` gives a `torch.nn.Module` computing the feature from audio `(..., C, T)` with the parameters of the feature. The module is compatible with `torch.jit.script`, so it can be embedded in exported models (e.g. to compute descriptors inside a TorchScript model at inference time) or saved with `torch.jit.save`. It gives the same outputs as the feature, with the same channel handling (mix of channels, or each channel with `keep_channels=True`). Modules of invertible features also have an `invert` method, exported to TorchScript. Features without module raise a `NotImplementedError`.
+
+| Family | Features with `nn_module` | `invert` |
+| ------ | ------------------------- | -------- |
+| Temporal | `RMS`, `ZeroCrossingRate`, `AttackTime`, `TemporalCentroid`, `CrestFactor` | |
+| Spectral | `SpectralCentroid`, `SpectralSpread`, `SpectralSkewness`, `SpectralKurtosis`, `SpectralRolloff`, `SpectralFlatness`, `SpectralCrest`, `SpectralFlux`, `SpectralContrast` | |
+| Onsets and rhythm | `OnsetStrength`, `OnsetRate`, `Tempo` | |
+| Harmonic | `Chroma`, `Harmonicity`, `Inharmonicity` | |
+| Quality | `ClippingRatio`, `Peak`, `DCOffset`, `DynamicRange`, `SilenceRatio` | |
+| Representations | `STFT` (same as `script()`), `DCT`, `Gammatone`, `Cepstrum`, `PQMF` | `STFT`, `DCT` : `invert(y, length=None)` ; `PQMF` |
+| Loudness and spectrograms | `Loudness` (same as `script()`), `Mel` (a copy of its `torchaudio` `MelSpectrogram`) | |
+
+Other features (`DGT`, `FFT`, `LPC`, `CQT`, `F0` / `Pitch`, spatial descriptors, `LoudnessMeter`, `BeatTrack`, MIDI, regexp and module embeddings) rely on numpy, librosa or external models and have no module. Transforms have modules as well (see [TorchScript modules of transforms](#torchscript-modules-of-transforms)).
+
+```python
+import torch
+from acids_dataset import features as F
+
+x = torch.randn(4, 2, 44100)
+rms = F.RMS(keep_channels=True)
+module = torch.jit.script(rms.nn_module())
+assert torch.allclose(module(x), rms(x), atol=1e-4)
+
+dct = torch.jit.script(F.DCT(frame_length=1024, window=None, keep_channels=True).nn_module())
+audio = dct.invert(dct(x), 44100)                       # inversion, also in TorchScript
+torch.jit.save(dct, "dct.ts")
+```
+
+New feature modules can subclass `acids_dataset.features.FeatureModule`, that mixes channels (or not, with `keep_channels`) and frames signals, and implement `compute` (see [Implementing features](#implementing-features)).
+
 ### Neural embeddings in online mode
 
 `ModuleEmbedding` features compute embeddings with a PyTorch or TorchScript model. In online mode, they are computed in data loader workers :
@@ -689,7 +721,7 @@ All features compute batches at once (`supports_batch`), except `BeatTrack`, `Af
 
 ## Data augmentation
 
-Data augmentations can work with both `np.ndarray` and `torch.Tensor`, and may be composed through the `transforms.Compose` that override usual list methods (`append` , `extend`, etc...). `acids-dataset` implements its own augmentations, and has a backend for the [audiomentations](https://github.com/iver56/audiomentations) package.
+Data augmentations can work with both `np.ndarray` and `torch.Tensor`, and may be composed through the `ad.transforms.Compose` that override usual list methods (`append` , `extend`, etc...). `acids-dataset` implements its own augmentations, and has a backend for the [audiomentations](https://github.com/iver56/audiomentations) package.
 
 
 Stochastic options of the base class are very powerful to develop versatile augmentation pipelines. For example :
@@ -697,12 +729,12 @@ Stochastic options of the base class are very powerful to develop versatile augm
 ```python
 from acids_dataset import transforms as atf
 
-pipeline = atf.Compose([
+pipeline = atf.Compose(
   atf.Stretch(131072, p=0.2), # Stretch is always non-batchwise, as output lengths depend on the random factor
   atf.Gain(p=0.8), 
   atf.Compress(p=0.5), 
   atf.Mute(p=0.1), 
-])
+)
 ```
 
 performs random resampling (speed and pitch change) with probability 20%, random gain with probability 80%, random compression with probability 50%, and mutes random batches with probability 10% (very useful to force models to learn silence). 
@@ -754,7 +786,7 @@ atf.NormRange(max_value=0.9, boost=False)                                  # onl
 
 ### Spatial transforms
 
-`MidSide`, `AmbisonicEncoder` and `AmbisonicDecoder` (`acids_dataset.transforms`) change the channels of multichannel signals, `(..., C, T)` : they are deterministic (`p` is ignored), and can be used as dataset transforms, in `sample_features`, or called on tensors and arrays. They are invertible (`invertible = True`) : `invert` gives inputs back, as for [invertible features](#inverting-features). Their default names are `midside` (`leftright` with `inverse=True`), `ambisonics` and `ambisonics_decoded`.
+`MidSide`, `AmbisonicEncoder` and `AmbisonicDecoder` (`acids_dataset.transforms`) change the channels of multichannel signals, `(..., C, T)` : they are deterministic (giving `p` raises an `AcidsTransformException`, see [Deterministic transforms](#deterministic-transforms)), and can be used as dataset transforms, in `sample_features`, or called on tensors and arrays. They are invertible (`invertible = True`) : `invert` gives inputs back, as for [invertible features](#inverting-features). Their default names are `midside` (`leftright` with `inverse=True`), `ambisonics` and `ambisonics_decoded`.
 
 ```python
 from acids_dataset import transforms as atf
@@ -794,7 +826,56 @@ With `layout=None`, `encoder.invert` infers the number of channels from signals 
 
 Decoders often have more loudspeakers than ambisonic channels : `AmbisonicEncoder(strict=False)` then encodes channels that cannot be encoded invertibly at a fixed order (sources are mixed in ambisonic signals), instead of raising a `ValueError`.
 
-For a full table of available transfroms, see at the [end](#full-augmentation-table) of `README.md`. 
+### Deterministic transforms
+
+Transforms that are not augmentations (`allow_random = False`) cannot be given a probability : `p` must be `None`, and other values raise an `AcidsTransformException` at initialization. They are always applied. This concerns `MidSide`, `AmbisonicEncoder`, `AmbisonicDecoder`, `Resample` and `Normalize` (of `acids_dataset.transforms.misc`), `PreEmphasis`, `Log1p`, `Exp1m`, `Derivator`, `Integrator`, `CompressRange`, `NormRange` and `BasicPitch`.
+
+```python
+atf.Log1p(p=0.5)     # AcidsTransformException : Log1p is not a probabilistic transform
+atf.Log1p()          # always applied
+```
+
+!!! note
+    `Log1p` and `Exp1m` used to be given `p=1.0` by default ; configurations or code giving them `p` must remove it.
+
+### TorchScript modules of transforms
+
+`transform.nn_module()` gives a `torch.nn.Module` applying the transform, compatible with `torch.jit.script` (e.g. to embed a pre-processing pipeline in an exported model). Modules are deterministic : the probability `p` of random transforms is not used. Modules of invertible transforms (`MidSide`, `AmbisonicEncoder`, `AmbisonicDecoder`) also have an `invert` method, exported to TorchScript. `Compose.nn_module()` gives a module applying the modules of its transforms sequentially.
+
+| Transform | Module |
+| --------- | ------ |
+| `MidSide` | `MidSideModule`, with `invert` |
+| `AmbisonicEncoder`, `AmbisonicDecoder` | `ChannelMatrixModule` (encoding / decoding matrix), with `invert`. The number of channels must be fixed : give `nn_module(n_channels=...)` for encoders without `layout`, and for decoders with `order="adaptive"` (otherwise a `ValueError` is raised) |
+| `Resample` (`transforms.misc`) | `torchaudio.transforms.Resample` |
+| `PreEmphasis` | `PreEmphasisModule` |
+| `Log1p`, `Exp1m` | `Log1pModule`, `Exp1mModule` |
+| `Normalize` (`transforms.misc`) | `NormalizeModule` (peak normalization to 0 dBFS, at most +30 dB) |
+| `Derivator`, `Integrator` | `LFilterModule` (IIR filter) |
+| `NormRange` | `NormRangeModule` |
+| `Compose` | `ComposeModule` |
+
+Random augmentations (`Gain`, `Stretch`, `RandomDelay`, `AddNoise`, audiomentations transforms, ...) and numpy-based transforms raise a `NotImplementedError`.
+
+!!! warning
+    `acids_dataset.transforms.Normalize` and `acids_dataset.transforms.Resample` are the [audiomentations](https://github.com/iver56/audiomentations) transforms, that have no module : the scriptable versions are `acids_dataset.transforms.misc.Normalize` and `acids_dataset.transforms.misc.Resample`.
+
+```python
+import torch
+from acids_dataset import transforms as atf
+from acids_dataset.transforms.misc import Normalize
+
+x = torch.randn(4, 2, 44100)
+pipeline = torch.jit.script(atf.Compose(atf.PreEmphasis(), Normalize()).nn_module())
+y = pipeline(x)
+
+encoder = torch.jit.script(atf.AmbisonicEncoder().nn_module(n_channels=2))   # stereo -> first order ambisonics
+assert torch.allclose(encoder.invert(encoder(x)), x, atol=1e-5)
+torch.jit.save(encoder, "encoder.ts")
+```
+
+Features have modules as well (see [TorchScript modules of features](#torchscript-modules-of-features)).
+
+For a full table of available transforms, see the [end](#full-augmentation-table) of `README.md`. 
 
 ## Extending `acids-dataset`
 
@@ -809,11 +890,13 @@ CQT:
   device=%DEVICE
   sr = %SAMPLE_RATE
 
-features.parse_features:
-  features = @features.CQT
+ad.features.parse_features:
+  features = @ad.features.CQT
 ```
 
 and update your database using `acids-dataset update --path ... --feature cqt_rene`. The feature will be added as `cqt_rene`, as the name in the configuration as been specified. 
+
+A default configuration file is written for every feature (`<feature name in lowercase>.gin`, e.g. `spectralcentroid.gin`, or `pitch_crepe.gin` / `f0_yin.gin` for features with several configurations) and for every transform (in `acids_dataset/configs/transforms`) when `acids_dataset` is imported, if it is missing. These files list the arguments of the class with their default values, and are a good starting point for custom configurations.
 
 
 ### Implementing features
@@ -887,8 +970,8 @@ Compress:
   limit = False
   sr = %SAMPLE_RATE
 
-transforms.parse_transform:
-    transform = @transforms.Compress
+ad.transforms.parse_transform:
+    transform = @ad.transforms.Compress
 ```
 
 ### Implementing transforms
@@ -896,7 +979,7 @@ transforms.parse_transform:
 A new transform can be done as follows :
 
 ```python
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class NewTransform(Transform):
     takes_as_input = Transform.input_types.torch
     allow_random = True
@@ -909,7 +992,31 @@ class NewTransform(Transform):
 ```
 
 and... that's it! `apply` provides the main operating function for data processing, and is directly called by `Transform` if `p=None` or randomly called if `p>0`.
-The `allow_random` attributes if transform can be randomized. You can also overload the method `apply_random(self, x)` to override how the transform behaves when `p>0`.
+The `allow_random` attributes if transform can be randomized. You can also overload the method `apply_random(self, x)` to override how the transform behaves when `p>0`. Deterministic transforms (that are not augmentations) should set `allow_random = False` : giving them a probability `p` then raises an `AcidsTransformException` (see [Deterministic transforms](#deterministic-transforms)).
+
+### TorchScript modules for new features and transforms
+
+Features and transforms may implement `nn_module(self, **kwargs)`, returning a `torch.nn.Module` compatible with `torch.jit.script` that computes the same outputs (see [TorchScript modules of features](#torchscript-modules-of-features) and [of transforms](#torchscript-modules-of-transforms)). The default implementation raises a `NotImplementedError`. Invertible features and transforms should also give their module an `invert` method, decorated with `@torch.jit.export`.
+
+```python
+import torch
+from acids_dataset.features import FeatureModule
+
+class MyDescriptorModule(FeatureModule):
+    def __init__(self, frame_length: int, hop_length: int, keep_channels: bool, sr: int):
+        super().__init__(keep_channels, frame_length=frame_length, hop_length=hop_length, sr=sr)
+
+    def compute(self, x: torch.Tensor) -> torch.Tensor:
+        # x : (..., C, T), with C = 1 (mix of channels) if keep_channels is False
+        return self.frames(x).abs().amax(-1)          # (..., C, n_frames)
+
+class MyDescriptor(AcidsDatasetFeature):
+    ...
+    def nn_module(self, **kwargs):
+        return MyDescriptorModule(self.frame_length, self.hop_length, self.keep_channels, self.sr)
+```
+
+`FeatureModule` mixes channels before `compute` (unless `keep_channels=True`, or `mix_channels=False` to receive every channel), removes the channel axis of outputs without `keep_channels`, and gives the helpers `frames(x)` and `power_spectrum(x)` (power spectrum of hann-windowed frames, and frequencies of bins). Transform modules can subclass `acids_dataset.transforms.TransformModule`.
 
 # Pre-processing
 
@@ -1257,7 +1364,7 @@ Available presets and their values can be listed with `acids-dataset presets` (a
 
 ## Writing presets
 
-Custom presets can be placed in an `ad_configs` folder of the current working directory (local presets take precedence over the ones of `acids_dataset/configs`), or given as paths to `.gin` files. Presets usually include `default.gin`, that binds these values to pre-processing (`RawParser`) and online datasets (`OnlineAudioDataset`), and redefine them. Features of `features.parse_features` are computed in both modes ; parameters specific to one mode can be bound to `RawParser` (pre-processing, e.g. `loudness_threshold`, `discard_if_lower_than`) or to `OnlineAudioDataset` (online, e.g. `batch_by`, `pad_mode`). For example, `$(pwd)/ad_configs/rave_loudness.gin` : 
+Custom presets can be placed in an `ad_configs` folder of the current working directory (local presets take precedence over the ones of `acids_dataset/configs`), or given as paths to `.gin` files. Presets usually include `default.gin`, that binds these values to pre-processing (`RawParser`) and online datasets (`OnlineAudioDataset`), and redefine them. Features of `ad.features.parse_features` are computed in both modes ; parameters specific to one mode can be bound to `RawParser` (pre-processing, e.g. `loudness_threshold`, `discard_if_lower_than`) or to `OnlineAudioDataset` (online, e.g. `batch_by`, `pad_mode`). For example, `$(pwd)/ad_configs/rave_loudness.gin` : 
 
 ```yaml
 include 'rave.gin'
@@ -1268,8 +1375,8 @@ Loudness:
     sr = %SAMPLE_RATE
     device = %DEVICE
 
-features.parse_features:
-    features = [@features.Loudness]
+ad.features.parse_features:
+    features = [@ad.features.Loudness]
 
 RawParser:
     loudness_threshold = -60

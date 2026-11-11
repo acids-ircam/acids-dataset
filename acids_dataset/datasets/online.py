@@ -30,7 +30,7 @@ def _entry_from_fragment(fragment, source: str, index=None):
     return _outs_from_pattern(fragment, "(%s)"%source, index=index)[0]
 
 
-@gin.configurable(module="datasets")
+@gin.configurable(module="ad.datasets")
 class OnlineAudioDataset(AudioDataset):
     """AudioDataset that parses audio files on the fly instead of reading a pre-processed database.
 

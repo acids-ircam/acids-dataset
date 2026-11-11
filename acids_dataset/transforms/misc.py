@@ -18,20 +18,24 @@ from scipy.stats import bernoulli
 from scipy.signal import lfilter, butter, sosfilt
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class Resample(Transform):
     """
     Resample target signal to target sample rate.
     """
+    allow_random = False
     takes_as_input = Transform.input_types.torch
     def __init__(self, sr: int | None = None, target_sr: int | None = None, **kwargs):
-        super().__init__(sr=sr)
+        super().__init__(sr=sr, **kwargs)
         assert self.sr is not None, "Resample needs the sr keyword"
         self.target_sr = target_sr or self.sr
 
     def apply(self, x):
         if (self.sr == self.target_sr): return x
         return torchaudio.functional.resample(x, self.sr, self.target_sr)
+
+    def nn_module(self, **kwargs):
+        return torchaudio.transforms.Resample(self.sr, self.target_sr)
 
     @classmethod
     def test(cls):
@@ -41,8 +45,9 @@ class Resample(Transform):
                 (Resample(44100, 88200), test_fn),
                 (Resample(44100, 32000), test_fn)]
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class PreEmphasis(Transform):
+    allow_random = False
     takes_as_input = Transform.input_types.torch
     def __init__(self, coeff: float = 0.97, **kwargs): 
         super().__init__(**kwargs)
@@ -51,8 +56,12 @@ class PreEmphasis(Transform):
     def apply(self, x):
         return torchaudio.functional.preemphasis(x, self.coeff)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import PreEmphasisModule
+        return PreEmphasisModule(float(self.coeff))
 
-@gin.configurable(module="transforms")
+
+@gin.configurable(module="ad.transforms")
 class Stretch(Transform):
     takes_as_input = Transform.input_types.torch
     def __init__(self, 
@@ -113,24 +122,34 @@ class Stretch(Transform):
         x_pitched = self._pitch_signal(x, random_pitch)
         return x_pitched
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class Log1p(Transform):
-    def __init__(self, contrast=1.0, p = 1.0, **kwargs):
-        super().__init__(p=p, **kwargs)
+    allow_random = False
+    def __init__(self, contrast=1.0, **kwargs):
+        super().__init__(**kwargs)
         self.contrast = contrast
     def apply(self, x):
         return torch.log(1 + torch.clamp(x * self.contrast, 1e-5))
 
-@gin.configurable(module="transforms")
+    def nn_module(self, **kwargs):
+        from .nn_modules import Log1pModule
+        return Log1pModule(float(self.contrast))
+
+@gin.configurable(module="ad.transforms")
 class Exp1m(Transform):
-    def __init__(self, contrast=1.0, p = 1.0, **kwargs):
-        super().__init__(p=p, **kwargs)
+    allow_random = False
+    def __init__(self, contrast=1.0, **kwargs):
+        super().__init__(**kwargs)
         self.contrast = contrast
     def apply(self, x):
         return torch.exp(x) / self.contrast - 1
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import Exp1mModule
+        return Exp1mModule(float(self.contrast))
 
-@gin.configurable(module="transforms")
+
+@gin.configurable(module="ad.transforms")
 class Crop(Transform):
     """Randomly crops signals to n_signal samples along dim. Signals shorter than n_signal are padded to n_signal
     first (and then returned whole).
@@ -199,7 +218,7 @@ class Crop(Transform):
         return super().__call__(x)
         
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class Dequantize(Transform):
     def __init__(self, bit_depth = 16, **kwargs):
         super().__init__(**kwargs)
@@ -212,7 +231,7 @@ class Dequantize(Transform):
             x += np.random.rand(*x.shape) / 2**self.bit_depth
         return x
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class Compress(Transform):
     takes_as_input = Transform.input_types.torch
     def __init__(self, threshold = -40, amp_range = [-60, 0], attack=0.1, release=0.1, prob=0.8, limit=True, sr=44100, **kwargs):
@@ -239,7 +258,7 @@ class Compress(Transform):
         return x_aug.reshape(batch_size + (x.shape[-1],))
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class Gain(Transform):
     takes_as_input = Transform.input_types.torch
     def __init__(self, gain_range: Tuple[int, int] | None = None, limit = True, **kwargs):
@@ -257,7 +276,7 @@ class Gain(Transform):
         return x_amp
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class Mute(Transform):
     def __init__(self, p: float = 0.1, noise_std: float = 1.e-5, **kwargs):
         super().__init__(p=p, **kwargs)
@@ -275,7 +294,7 @@ class Mute(Transform):
             else:
                 return np.zeros_like(x)
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class PhaseMangle(Transform):
     takes_as_input = Transform.input_types.torch
     def __init__(self, 
@@ -296,7 +315,7 @@ class PhaseMangle(Transform):
         return random_phase_mangle(x, self.min_f, self.max_f, self.amplitude, self.sr)
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class FrequencyMasking(Transform):
     takes_as_input = Transform.input_types.torch
     def __init__(self, p = 0.5, n_fft: int = 4096, max_size: int = 512, **kwargs):
@@ -325,7 +344,7 @@ class FrequencyMasking(Transform):
             return input.shape[-1] == output.shape[-1]
         return [(cls(), is_out_ok)]
             
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class RandomEQ(Transform):
     """
     Random equalization. From Victor Shepardson's fork of RAVE (https://github.com/victor-shepardson/RAVE)
@@ -388,7 +407,7 @@ class RandomEQ(Transform):
         return [(cls(sr=44100), run_several_times)]
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class RandomDelay(Transform):
     takes_as_input = Transform.input_types.torch
     def __init__(self, max_delay:float=1024, **kwargs):
@@ -411,7 +430,7 @@ class RandomDelay(Transform):
         delayed = x[..., 1:-d_lo]*(1-l) + x[..., :-d_hi]*l
         mix = (random.random()*2-1)**3
         return mirror_pad(x[..., d_hi:] + delayed*mix, x.shape[-1])
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class RandomDistort(Transform):
     takes_as_input = Transform.input_types.numpy 
     def __init__(self, sr, max_drive=32, p_lp=0.75, p_bp=0.5, n_bp=2, p_ls=0.5, **kw):
@@ -432,29 +451,45 @@ class RandomDistort(Transform):
         return np.tanh(x_eq*norm*drive)/norm * mix + x * (1-mix)
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class Normalize(Transform):
+    allow_random = False
     takes_as_input = Transform.input_types.torch
     def apply(self, x):
         return normalize_signal(x)
 
-@gin.configurable(module="transforms")
+    def nn_module(self, **kwargs):
+        from .nn_modules import NormalizeModule
+        return NormalizeModule()
+
+@gin.configurable(module="ad.transforms")
 class Derivator(Transform):
+    allow_random = False
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
     def apply(self, x):
         return derivate(x)
 
-@gin.configurable(module="transforms")
+    def nn_module(self, **kwargs):
+        from .nn_modules import LFilterModule
+        return LFilterModule(torch.Tensor([.5, -.5]), torch.Tensor([1., 0.]))
+
+@gin.configurable(module="ad.transforms")
 class Integrator(Transform):
+    allow_random = False
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         assert self.sr is not None, "sr is required for %s"%(type(self).__name__)
     def apply(self, x):
         return integrate(x, self.sr)
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import LFilterModule
+        alpha = 1 / (1 + 1 / self.sr * 2 * torch.pi * 10)
+        return LFilterModule(torch.Tensor([alpha**2, -alpha**2, 0]), torch.Tensor([1, -2 * alpha, alpha**2]))
 
-@gin.configurable(module="transforms")
+
+@gin.configurable(module="ad.transforms")
 class AddNoise(Transform):
     takes_as_input = Transform.input_types.torch
     def __init__(self, std=1.e-5, **kwargs):
@@ -471,7 +506,7 @@ def _leading_flatten(x: torch.Tensor):
     return x.reshape((-1,) + x.shape[-2:]), x.shape
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class CompressRange(Transform):
     """compresses (or expands) the loudness range of the input to target_range : the loudness of frames of
     frame_duration seconds is mapped linearly from input_range to target_range, and the resulting gain is interpolated
@@ -492,6 +527,7 @@ class CompressRange(Transform):
         mode (str): loudness measure ("lufs", "db" or "dba"). Defaults to "lufs".
         sr (int): sampling rate. Defaults to 44100.
     """
+    allow_random = False
     takes_as_input = Transform.input_types.torch
 
     def __init__(self, target_range: Tuple[float, float] = (-30., -14.), input_range: Tuple[float, float] | None = None,
@@ -566,7 +602,7 @@ class CompressRange(Transform):
         return out.reshape(shape)
 
 
-@gin.configurable(module="transforms")
+@gin.configurable(module="ad.transforms")
 class NormRange(Transform):
     """scales the input such that its peak (maximum absolute amplitude, over channels) equals max_value : louder inputs
     are divided, quieter ones multiplied (only louder ones if boost is False). Each item of a batch is scaled
@@ -576,6 +612,7 @@ class NormRange(Transform):
         max_value (float): target peak. Defaults to 1.
         boost (bool): also scale up inputs whose peak is below max_value. Defaults to True.
     """
+    allow_random = False
     takes_as_input = Transform.input_types.torch
 
     def __init__(self, max_value: float = 1., boost: bool = True, **kwargs):
@@ -592,3 +629,7 @@ class NormRange(Transform):
         if not self.boost:
             scale = scale.clamp(max=1.)
         return (x_flat * scale).reshape(shape)
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import NormRangeModule
+        return NormRangeModule(self.max_value, self.boost)

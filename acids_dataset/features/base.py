@@ -42,8 +42,8 @@ default_feature_pattern = """
 \tdevice=%DEVICE
 \t{{ARGS}}
 
-features.parse_features:
-    features = @features.{{NAME}}
+ad.features.parse_features:
+    features = @ad.features.{{NAME}}
 """
 
 class AcidsDatasetFeature(object):
@@ -98,6 +98,12 @@ class AcidsDatasetFeature(object):
         """audio from outputs of the feature, for invertible features (see invertible) ; raises a NotImplementedError
         otherwise."""
         raise NotImplementedError("%s is not invertible"%type(self).__name__)
+
+    def nn_module(self, **kwargs) -> torch.nn.Module:
+        """TorchScript-compatible torch.nn.Module computing the feature from audio (forward), with an invert method for
+        invertible features. Raises a NotImplementedError for features without module (e.g. numpy / librosa based
+        features)."""
+        raise NotImplementedError("%s has no nn_module"%type(self).__name__)
 
     def _sample(self, pos: int | float | None, sr: int):
         if isinstance(pos, float):

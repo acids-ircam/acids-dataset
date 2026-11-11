@@ -8,7 +8,7 @@ from .framed import _EPS, _frames, _ChannelFeature, _SpectralFeature
 C0 = 16.351597831287414
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Chroma(_SpectralFeature):
     """energy of the 12 pitch classes (0 : C, 1 : C#, ... 11 : B) between fmin and fmax, per frame, normalized by the
     maximum of each frame (norm="max"), by their sum (norm="sum"), or not (norm=None). Output (..., 12, n_frames)."""
@@ -34,6 +34,10 @@ class Chroma(_SpectralFeature):
         elif self.norm == "sum":
             chroma = chroma / chroma.sum(-2, keepdim=True).clamp(min=_EPS)
         return chroma
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import ChromaModule
+        return ChromaModule(self.frame_length, self.hop_length, self.fmin, self.fmax, self.norm, self.keep_channels, self.sr)
 
 
 def _autocorrelation(frames: torch.Tensor) -> torch.Tensor:
@@ -72,7 +76,7 @@ def _periodicity(frames: torch.Tensor, sr: int, fmin: float, fmax: float):
     return value, best.to(frames.dtype) + offset
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Harmonicity(_ChannelFeature):
     """periodicity of frames : maximum of the normalized autocorrelation for periods between 1 / fmax and 1 / fmin, in
     [0, 1] (~1 for periodic sounds, ~0 for noise)."""
@@ -87,8 +91,12 @@ class Harmonicity(_ChannelFeature):
     def compute(self, x):
         return _periodicity(_frames(x, self.frame_length, self.hop_length), self.sr, self.fmin, self.fmax)[0]
 
+    def nn_module(self, **kwargs):
+        from .nn_modules import HarmonicityModule
+        return HarmonicityModule(self.frame_length, self.hop_length, self.fmin, self.fmax, self.keep_channels, self.sr)
 
-@gin.configurable(module="features")
+
+@gin.configurable(module="ad.features")
 class Inharmonicity(_SpectralFeature):
     """deviation of partials from a harmonic series : the fundamental is estimated by autocorrelation and refined on the
     first spectral peak f_1, and inharmonicity is the mean relative deviation |f_k / (k f_1) - 1| of the peaks of partials
@@ -131,6 +139,10 @@ class Inharmonicity(_SpectralFeature):
         total = weights.sum(-1)
         inharmonicity = (deviations * weights).sum(-1) / total.clamp(min=_EPS)
         return torch.where((total > _EPS) & (periodicity > 0), inharmonicity, torch.zeros_like(inharmonicity))
+
+    def nn_module(self, **kwargs):
+        from .nn_modules import InharmonicityModule
+        return InharmonicityModule(self.frame_length, self.hop_length, self.n_harmonics, self.fmin, self.fmax, self.keep_channels, self.sr)
 
 
 __all__ = ['Chroma', 'Harmonicity', 'Inharmonicity']

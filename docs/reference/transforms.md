@@ -1,6 +1,6 @@
 # Transforms
 
-Spatial and loudness transforms. For the list of augmentations, see the [Augmentations guide](../guide/augmentations.md).
+Spatial and loudness transforms, and their TorchScript modules. For the list of augmentations, see the [Augmentations guide](../guide/augmentations.md).
 
 ## Base classes
 
@@ -29,3 +29,12 @@ Spatial and loudness transforms. For the list of augmentations, see the [Augment
     options:
       show_root_heading: false
       members: [CompressRange, NormRange]
+
+## TorchScript modules
+
+Modules given by `transform.nn_module()` (see [TorchScript modules](../guide/augmentations.md#torchscript-modules)).
+
+::: acids_dataset.transforms.nn_modules
+    options:
+      show_root_heading: false
+      members: [TransformModule, IdentityModule, ChannelMatrixModule, MidSideModule, PreEmphasisModule, Log1pModule, Exp1mModule, NormalizeModule, LFilterModule, NormRangeModule, ComposeModule]

@@ -7,7 +7,7 @@ from . import RAISE_EXC_IF_FEATURE_ERROR
 from .base import AcidsDatasetFeature
 
 
-@gin.configurable(module="features")
+@gin.configurable(module="ad.features")
 class Mel(AcidsDatasetFeature):
     def __init__(
             self, 
@@ -51,6 +51,11 @@ class Mel(AcidsDatasetFeature):
         super().to(device)
         self.mel_spectrogram = self.mel_spectrogram.to(self.device)
         return self
+
+    def nn_module(self, **kwargs):
+        """copy of the torchaudio MelSpectrogram computing the feature."""
+        import copy
+        return copy.deepcopy(self.mel_spectrogram)
 
     def __call__(self, x):
         if torch.is_tensor(x) and next(iter(self.mel_spectrogram.buffers())).device != x.device:

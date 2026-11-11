@@ -86,11 +86,14 @@ class Transform():
         Args:
             sr (int | None, optional): Input sampling rate. Defaults to None.
             name (str | None, optional): Optional transform name. Defaults to None.
-            p (float | None, optional): Optional probability (must allow random). Defaults to None.
+            p (float | None, optional): Optional probability (must allow random ; deterministic transforms only accept
+                None or 1.0, i.e. always applied). Defaults to None.
             rand_batchwise (bool, optional): Is randomness batchwise or indexwise. Defaults to True.
         """
-        if (p is not None) and (not self.allow_random):
-            raise AcidsTransformException("%s is not a probabilistic transform : p must be None, got %s"%(type(self).__name__, p))
+        if not self.allow_random:
+            if (p is not None) and (float(p) != 1.0):
+                raise AcidsTransformException("%s is not a probabilistic transform : p must be None or 1.0, got %s"%(type(self).__name__, p))
+            p = None  # always applied
         self.sr = sr
         self.name = name
         self.p = p

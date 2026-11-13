@@ -150,7 +150,10 @@ class GinEnv(object):
                     gin_dict[k] = dill.dumps(v)
                 except: 
                     gin_dict[k] = v
-        return copy.deepcopy(gin_dict)
+        # entries are already copied: a deepcopy here would evaluate gin ConfigurableReferences
+        # (@configurable bindings) into the configurables themselves, which are then dropped
+        # from gin.config_str() once the environment is restored.
+        return gin_dict
     
     def __enter__(self):
         self._dict = self._copy_gin_dict()

@@ -1,15 +1,14 @@
-# Builds the documentation and publishes it on GitHub Pages (Settings > Pages > Source : GitHub Actions)
+# Checks that the documentation builds. Publishing is done by Read the Docs (see .readthedocs.yaml).
 name: docs
 
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   build:
@@ -21,15 +20,3 @@ jobs:
           python-version: "3.11"
       - run: pip install -r docs/requirements.txt
       - run: mkdocs build --strict
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4

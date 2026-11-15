@@ -486,7 +486,7 @@ class Integrator(Transform):
     def nn_module(self, **kwargs):
         from .nn_modules import LFilterModule
         alpha = 1 / (1 + 1 / self.sr * 2 * torch.pi * 10)
-        return LFilterModule(torch.Tensor([alpha**2, -alpha**2, 0]), torch.Tensor([1, -2 * alpha, alpha**2]))
+        return LFilterModule(torch.tensor([alpha**2, -alpha**2, 0], dtype=torch.float64), torch.tensor([1, -2 * alpha, alpha**2], dtype=torch.float64))
 
 
 @gin.configurable(module="ad.transforms")

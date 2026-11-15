@@ -122,7 +122,9 @@ class NormalizeModule(TransformModule):
 
 
 class LFilterModule(TransformModule):
-    """IIR filter (torchaudio.functional.lfilter) of coefficients b (numerator) and a (denominator)."""
+    """IIR filter of coefficients b (numerator) and a (denominator), equivalent to torchaudio.functional.lfilter 
+    (without clamping). torchaudio's implementation is not scriptable with recent versions of torch, so the filter is 
+    written here : an FIR convolution by b, followed by the recursion on a if the filter has poles."""
 
     def __init__(self, b: torch.Tensor, a: torch.Tensor):
         super().__init__()
@@ -130,7 +132,26 @@ class LFilterModule(TransformModule):
         self.register_buffer("a", a)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return torchaudio.functional.lfilter(x, self.a.to(x), self.b.to(x), clamp=False)
+        # recursions of poles close to the unit circle are not accurate enough in single precision
+        a = self.a.to(torch.float64)
+        b = self.b.to(torch.float64) / a[0]
+        a = a / a[0]
+        shape = x.shape
+        n_samples = shape[-1]
+        flat = x.reshape(-1, 1, n_samples).to(torch.float64)
+        flat = torch.nn.functional.pad(flat, [b.shape[0] - 1, 0])
+        y = torch.nn.functional.conv1d(flat, b.flip(0).reshape(1, 1, -1))[:, 0]
+        n_poles = a.shape[0] - 1
+        if n_poles > 0 and bool((a[1:] != 0).any()):
+            out = torch.zeros_like(y)
+            for t in range(n_samples):
+                m = min(n_poles, t)
+                acc = y[:, t]
+                if m > 0:
+                    acc = acc - (out[:, t - m:t] * a[1:m + 1].flip(0)).sum(-1)
+                out[:, t] = acc
+            y = out
+        return y.reshape(shape).to(x.dtype)
 
 
 class NormRangeModule(TransformModule):

@@ -14,6 +14,21 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.slow)
 
 
+BEAT_TRACKING_TESTS = {"test_beat_tracking"}
+
+
+@pytest.fixture(autouse=True)
+def skip_if_beat_checkpoint_unavailable(request):
+    """beat tracking needs a pretrained checkpoint, downloaded on first use : skipped if the download fails (e.g. offline)."""
+    if request.node.originalname not in BEAT_TRACKING_TESTS:
+        return
+    from acids_dataset.features.beat_this.inference import load_checkpoint
+    try:
+        load_checkpoint("final0")
+    except ValueError as e:
+        pytest.skip("beat tracking checkpoint unavailable : %s" % (e.__cause__ or e))
+
+
 @pytest.fixture(autouse=True)
 def clear_gin_bindings():
     """some tests parse gin configs globally : bindings (e.g. of datasets, through presets) are cleared after each test, 

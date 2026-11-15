@@ -47,11 +47,11 @@ def load_checkpoint(checkpoint_path: str, device = "cpu") -> dict:
                 file_name=file_name,
                 map_location=device,
             )
-        except Exception:
+        except Exception as e:
             raise ValueError(
                 "Could not load the checkpoint given the provided name",
                 checkpoint_path,
-            )
+            ) from e
 
 
 def load_model(

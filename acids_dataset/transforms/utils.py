@@ -36,8 +36,10 @@ def derivate(x, clamp=False):
 def integrate(x, sr, clamp=False):
     if torch.is_tensor(x):
         alpha = 1 / (1 + 1 / sr * 2 * torch.pi * 10)
-        integrator = (torch.Tensor([alpha**2, -alpha**2, 0]), torch.Tensor([1, -2 * alpha, alpha**2]))
-        return torchaudio.functional.lfilter(x, integrator[1], integrator[0], clamp=clamp)
+        # poles are close to the unit circle : computed in double precision
+        b = torch.tensor([alpha**2, -alpha**2, 0], dtype=torch.float64)
+        a = torch.tensor([1, -2 * alpha, alpha**2], dtype=torch.float64)
+        return torchaudio.functional.lfilter(x.double(), a, b, clamp=clamp).to(x.dtype)
     else:
         alpha = 1 / (1 + 1 / sr * 2 * np.pi * 10)
         integrator = ([alpha**2, -alpha**2], [1, -2 * alpha, alpha**2])

@@ -29,7 +29,7 @@ dependencies = [
     "numpy>=1.23.5",
     "scipy>=1.8",
     "scikit-learn>=1.0.2",
-    "librosa>=0.10.2",
+    "librosa>=0.10.2,<0.12",  # audiomentations 0.43 rejects librosa 1.x : pip would silently backtrack to audiomentations 0.7
     "torch",
     "torchaudio",
     "torchcodec",
@@ -44,7 +44,7 @@ dependencies = [
     "pretty_midi",
     "einops",
     "rotary_embedding_torch",
-    "audiomentations",
+    "audiomentations>=0.37",
     "acids-transforms"
 ]
 

@@ -13,8 +13,12 @@ __bypassed_audiomentations = [
 ]
 
 
+# audiomentations renamed BasicTransform -> BaseTransform across versions
+_base_transform_cls = getattr(ta.core.transforms_interface, "BaseTransform", None) \
+    or getattr(ta.core.transforms_interface, "BasicTransform")
+
 __augmentations_to_import = list(filter(lambda x: (type(x).__name__ not in dir(misc)) and (type(x).__name__ not in __bypassed_audiomentations), 
-                                        get_subclasses_from_package(ta.augmentations, ta.core.transforms_interface.BaseTransform) 
+                                        get_subclasses_from_package(ta.augmentations, _base_transform_cls) 
                             ))
 
 

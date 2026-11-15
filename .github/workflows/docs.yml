@@ -19,4 +19,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r docs/requirements.txt
-      - run: mkdocs build --strict
+      - run: mkdocs build --strict -f docs/mkdocs.yml

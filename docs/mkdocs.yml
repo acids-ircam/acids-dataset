@@ -3,6 +3,7 @@ site_description: Pre-processing, online loading and sampling of audio datasets 
 repo_url: https://github.com/acids-ircam/acids-dataset
 repo_name: acids-ircam/acids-dataset
 edit_uri: edit/main/docs/
+docs_dir: .
 
 theme:
   name: material
@@ -69,7 +70,7 @@ plugins:
   - mkdocstrings:
       handlers:
         python:
-          paths: [.]
+          paths: [..]
           options:
             docstring_style: google
             show_source: false

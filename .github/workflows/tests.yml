@@ -39,7 +39,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: python dependencies
         run: |
-          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install torch torchaudio torchcodec --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[ui]" pytest pytest-timeout gradio_client
       - name: tests
         # test_transforms.py has known failures (see TODO.md)
@@ -62,7 +62,7 @@ jobs:
         run: |
           grep -oE '"(numpy|scipy|scikit-learn|librosa)>=[^"]+"' pyproject.toml | tr -d '"' | sed 's/>=/==/' > minimum.txt
           cat minimum.txt
-          pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+          pip install torch torchaudio torchcodec --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[ui]" pytest pytest-timeout gradio_client -c minimum.txt
       - name: tests
         run: pytest tests -m "not slow" --ignore=tests/test_transforms.py -p no:warnings --timeout=900

@@ -4,6 +4,7 @@ repo_url: https://github.com/acids-ircam/acids-dataset
 repo_name: acids-ircam/acids-dataset
 edit_uri: edit/main/docs/
 docs_dir: .
+site_dir: ../site
 
 theme:
   name: material

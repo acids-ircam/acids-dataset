@@ -28,4 +28,4 @@ mkdocs serve                # local preview at http://127.0.0.1:8000
 mkdocs build --strict       # static site in site/
 ```
 
-The pages of the [documentation](index.md) mirror the sections of the README : keep both in sync when documenting a feature.
+Features are documented in the [user guide](index.md) (`docs/guide/`) ; the README is only an overview, and links to it.

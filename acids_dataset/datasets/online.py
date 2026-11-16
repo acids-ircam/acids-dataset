@@ -114,6 +114,7 @@ class OnlineAudioDataset(AudioDataset):
                  write_index: bool = True,
                  max_samples: int | None = None,
                  features_after_transforms: bool = True,
+                 float_dtype: torch.dtype | str | None = "float32",
                  **kwargs) -> None:
         """
         Args:
@@ -143,6 +144,8 @@ class OnlineAudioDataset(AudioDataset):
             exclude (List[str], optional): glob-like patterns to exclude audio paths. Defaults to [].
             valid_exts (List[str] | None, optional): valid audio extensions, None for default ones. Defaults to None.
             bformat (str, optional): audio format of loaded fragments. Defaults to "float32".
+            float_dtype (torch.dtype | str | None, optional): dtype of floating point outputs (waveforms, features...), e.g.
+                torch.float32 or "float16" ; None keeps loaded dtypes. Defaults to "float32".
             rescan (bool, optional): ignore existing index files and re-scan every file. Defaults to False.
             write_index (bool, optional): write index files after scanning. Defaults to True.
         """
@@ -154,7 +157,8 @@ class OnlineAudioDataset(AudioDataset):
         if len(set(folder_names)) != len(folder_names):
             raise ValueError("dataset folders must have distinct names, got %s"%self._paths)
         self._init_common(transforms=transforms, output_pattern=output_pattern, output_type=output_type, 
-                          channels=channels, max_samples=max_samples, features_after_transforms=features_after_transforms)
+                          channels=channels, max_samples=max_samples, features_after_transforms=features_after_transforms,
+                          float_dtype=float_dtype)
         self._index_dir = None if index_dir is None else Path(index_dir).resolve()
         self._partition_dir = None if partition_dir is None else Path(partition_dir).resolve()
         self._filters = checklist(filters)
@@ -486,10 +490,10 @@ class OnlineAudioDataset(AudioDataset):
             t = entry_transforms[i]
             outs.append(out if t is None else t(_check_channels(out, self._n_channels)))
         if kind == "single":
-            return outs[0]
+            return self._cast_outputs(outs[0])
         if kind == "tuple":
-            return tuple(outs)
-        return {alias: out for out, (_, alias) in zip(outs, entries)}
+            return self._cast_outputs(tuple(outs))
+        return self._cast_outputs({alias: out for out, (_, alias) in zip(outs, entries)})
 
     def _load_chunk(self, index):
         """returns (file index, start, audio) of the chunk at index (silent chunks are drawn again, see loudness_threshold)."""
@@ -1121,7 +1125,8 @@ class OnlineAudioDataset(AudioDataset):
                            check=check, device=device, files=[f['path'] for f in files], metadata={'source': source})
         # arguments of the returned dataset default to the ones of this dataset
         dataset_kwargs = {'output_pattern': self.output_pattern, 'transforms': self.transforms, 
-                          'channels': self._n_channels if self._n_channels is not None else 1, **dataset_kwargs}
+                          'channels': self._n_channels if self._n_channels is not None else 1, 
+                          'float_dtype': self.float_dtype, **dataset_kwargs}
         dataset = PreprocessedAudioDataset(out, **dataset_kwargs)
         names = self.list_partitions() if partitions is True else list(partitions or [])
         for name in names:

@@ -6,7 +6,7 @@ import re
 from typing import Any, Dict, List, Optional
 import torch
 
-from .utils import _check_channels
+from .utils import _check_channels, _cast_floats
 
 _SUBINDEX = re.compile(r"^(\S+)\[([\d\:\-]+)\]$")
 AUDIO_KEY = "__audio__"
@@ -123,6 +123,7 @@ class BatchFeatureProcessor():
                         self.features.append(computed[name]); names.append(name)
         names = [f.feature_name for f in self.features]
         self.n_channels = dataset._n_channels
+        self.float_dtype = dataset.float_dtype
         self.batch_entries = [entry_name(source) in names for source, _ in self.entries]
         # features are computed on the augmented waveform output (after its transforms) if any, and on raw audio otherwise
         # (or always on raw audio if features are computed before transforms)
@@ -165,10 +166,10 @@ class BatchFeatureProcessor():
                         value = value[:, subidx]
                     outs[i] = self._transform(i, value)
         if self.kind == "single":
-            return outs[0]
+            return _cast_floats(outs[0], self.float_dtype)
         if self.kind == "tuple":
-            return tuple(outs)
-        return {alias: outs[i] for i, (_, alias) in enumerate(self.entries)}
+            return _cast_floats(tuple(outs), self.float_dtype)
+        return _cast_floats({alias: outs[i] for i, (_, alias) in enumerate(self.entries)}, self.float_dtype)
 
 
 class BatchFeatureLoader():

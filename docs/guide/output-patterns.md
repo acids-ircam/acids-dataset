@@ -34,3 +34,19 @@ dataset.get(slice(0, 4), "{waveform,mel}")      # => dictionary of batched wavef
 ```
 
 Output patterns access the buffers of data fragments (waveform and array features). Path-based metadata extracted with `meta_regexp` is stored as fragment metadata, and is not accessible through output patterns.
+
+## Output dtype
+
+With `float_dtype`, floating point outputs (waveforms, features, metadata) are cast to a given dtype, whatever their stored or computed dtype ; integer outputs (e.g. hashed labels) are not modified. It can be given as a `torch.dtype`, a numpy dtype, or a string (`"float32"`, `"float"`, `"float16"`, `"half"`, `"bfloat16"`, `"float64"`, `"double"`) ; `None` (default) keeps loaded dtypes.
+
+```python
+dataset = AudioDataset(data_path, output_pattern="{waveform,loudness}", float_dtype=torch.float16)
+dataset[0]['waveform'].dtype                    # => torch.float16
+dataset.float_dtype = "float32"                 # can also be set afterwards
+```
+
+- Outputs are cast after their transforms : transforms receive audio as loaded (float32).
+- Features computed on batches (see [batch features](loaders.md#batch-features)) are cast as well.
+- `CombinedAudioDataset(..., float_dtype=...)` casts the outputs of every combined dataset ; with `None`, each dataset keeps its own setting.
+- `OnlineAudioDataset.preprocess` gives its `float_dtype` to the returned pre-processed dataset.
+- With `output_type="numpy"`, arrays are cast to the equivalent numpy dtype, except for `bfloat16` (that numpy lacks) : outputs are then returned as tensors.

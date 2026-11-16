@@ -9,7 +9,8 @@ from abc import abstractmethod, ABCMeta
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, TypeVar, TYPE_CHECKING
 from .. import transforms
-from .utils import _outs_from_pattern, _transform_outputs, is_multi_index, multi_index_to_list, collate_items
+from .utils import _outs_from_pattern, _transform_outputs, is_multi_index, multi_index_to_list, collate_items, \
+    parse_float_dtype, _cast_floats
 
 TransformType = Optional[transforms.Transform | List[transforms.Transform] | Dict[str, transforms.Transform]]
 
@@ -274,8 +275,10 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
                      channels: int | None = 1,
                      subindices = None,
                      max_samples: int | None = None,
-                     features_after_transforms: bool = True) -> None:
+                     features_after_transforms: bool = True,
+                     float_dtype = "float32") -> None:
         self._transforms = transforms
+        self._float_dtype = parse_float_dtype(float_dtype)
         self._features_after_transforms = bool(features_after_transforms)
         self._output_pattern = output_pattern
         self._output_type = output_type
@@ -488,7 +491,11 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
         item_index = _global_index if _global_index is not None else (index % len(self) if isinstance(index, int) else None)
         outs = _outs_from_pattern(fg, output_pattern, index=item_index)
         outs = _transform_outputs(outs, transforms, self._n_channels)
-        return outs
+        return self._cast_outputs(outs)
+
+    def _cast_outputs(self, outs):
+        """casts floating point outputs to float_dtype (if not None)."""
+        return _cast_floats(outs, getattr(self, "_float_dtype", None))
 
     def item_labels(self, features, n_bins: int = 10) -> List[Any]:
         """label of each item for given features : values of categorical (hashed) features, and histogram (quantile) 
@@ -838,6 +845,15 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
     def output_pattern(self, pattern):
         assert isinstance(pattern, str)
         self._output_pattern = pattern
+
+    @property
+    def float_dtype(self) -> torch.dtype | None:
+        """dtype of floating point outputs (waveforms, features...) ; None keeps loaded dtypes."""
+        return getattr(self, "_float_dtype", None)
+
+    @float_dtype.setter
+    def float_dtype(self, dtype):
+        self._float_dtype = parse_float_dtype(dtype)
 
     @property
     def transforms(self):

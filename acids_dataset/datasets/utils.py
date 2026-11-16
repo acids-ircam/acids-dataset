@@ -154,7 +154,50 @@ def _transform_outputs(outs, transforms, n_channels=None):
                 outs = transforms(_check_channels(outs, n_channels))
     return outs
 
-@gin.configurable(module="ad.data")        
+_FLOAT_DTYPE_ALIASES = {
+    'float': torch.float32, 'float32': torch.float32, 'single': torch.float32,
+    'double': torch.float64, 'float64': torch.float64,
+    'half': torch.float16, 'float16': torch.float16,
+    'bfloat16': torch.bfloat16,
+}
+
+def parse_float_dtype(dtype) -> torch.dtype | None:
+    """parses a floating point dtype, given as a torch.dtype, a numpy dtype, or a string (e.g. "float32", "torch.float16",
+    "half"). None is kept as None."""
+    if dtype is None or isinstance(dtype, torch.dtype):
+        parsed = dtype
+    elif isinstance(dtype, str):
+        name = dtype.lower().removeprefix("torch.")
+        if name not in _FLOAT_DTYPE_ALIASES:
+            raise ValueError("unknown float dtype %s (valid : %s)"%(dtype, ", ".join(_FLOAT_DTYPE_ALIASES)))
+        parsed = _FLOAT_DTYPE_ALIASES[name]
+    else:
+        import numpy as np
+        parsed = torch.from_numpy(np.zeros(0, dtype=dtype)).dtype
+    if parsed is not None and not parsed.is_floating_point:
+        raise ValueError("float_dtype must be a floating point dtype, got %s"%dtype)
+    return parsed
+
+def _cast_floats(outs, dtype: torch.dtype | None):
+    """casts floating point tensors / arrays of (possibly nested) outputs to dtype ; other outputs are unchanged."""
+    if dtype is None:
+        return outs
+    if torch.is_tensor(outs):
+        return outs.to(dtype) if outs.is_floating_point() and outs.dtype != dtype else outs
+    if isinstance(outs, dict):
+        return {k: _cast_floats(v, dtype) for k, v in outs.items()}
+    if isinstance(outs, (list, tuple)):
+        return type(outs)(_cast_floats(v, dtype) for v in outs)
+    import numpy as np
+    if isinstance(outs, np.ndarray) and np.issubdtype(outs.dtype, np.floating):
+        if dtype == torch.bfloat16:
+            # numpy has no bfloat16 : arrays are converted to tensors
+            return torch.from_numpy(outs).to(dtype)
+        np_dtype = torch.empty(0, dtype=dtype).numpy().dtype
+        return outs if outs.dtype == np_dtype else outs.astype(np_dtype)
+    return outs
+
+@gin.configurable(module="ad.data")
 def split_dataset(dataset, **parts):
     raise NotImplementedError
 

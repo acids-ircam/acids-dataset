@@ -186,7 +186,7 @@ dataset = AudioDataset(["path/to/preprocessed", "path/to/raw/audio"], sr=44100) 
 loader = dataset.get_loader(batch_size=16, chunk_length=131072)                     # loading arguments configure online datasets
 ```
 
-Dataset arguments such as `sr` are given to each dataset : `sr` resamples pre-processed datasets as well as online ones, such that items of every dataset have the same sampling rate (combined datasets do not check it otherwise).
+Dataset arguments such as `sr` are given to each dataset : `sr` resamples pre-processed datasets as well as online ones, such that items of every dataset have the same sampling rate (combined datasets do not check it otherwise). Likewise, `float_dtype` casts floating point outputs of every combined dataset to the same dtype (see [output dtype](output-patterns.md#output-dtype)).
 
 `weights` are the sampling probabilities of datasets (here, 70% of items come from the first dataset, whatever the sizes of datasets) ; without weights, items are sampled uniformly. Loading arguments (`chunk_length`, `batch_by`, `features_after_transforms`...) configure the datasets they apply to ; a `chunk_length` different from the one of a pre-processed dataset raises an error, as items could not be batched together.
 

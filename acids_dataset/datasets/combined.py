@@ -29,6 +29,7 @@ class CombinedAudioDataset(AudioDataset):
                  _dataset_preset: tuple | None = None,
                  path: List[str | Path] | None = None,
                  features_after_transforms: bool | None = None,
+                 float_dtype: torch.dtype | str | None = None,
                  **dataset_kwargs: Any):
         """
         Args:
@@ -40,6 +41,8 @@ class CombinedAudioDataset(AudioDataset):
             features_after_transforms (bool | None, optional): compute features on audio after (True) or before (False) its
                 transforms (see AudioDataset.features_after_transforms), for every dataset ; None keeps the setting of 
                 datasets (True by default). Defaults to None.
+            float_dtype (torch.dtype | str | None, optional): dtype of floating point outputs of every dataset ; None keeps
+                the setting of each dataset. Defaults to None.
             **dataset_kwargs: arguments of datasets given as paths.
         """
         # path is an alias of datasets (see AudioDataset)
@@ -60,7 +63,7 @@ class CombinedAudioDataset(AudioDataset):
             assert all(w >= 0 for w in weights) and sum(weights) > 0, "weights must be positive"
         self._init_common(transforms=transforms, output_pattern=datasets[0]._output_pattern, output_type=datasets[0]._output_type,
                           channels=datasets[0]._n_channels, max_samples=max_samples, 
-                          features_after_transforms=datasets[0].features_after_transforms)
+                          features_after_transforms=datasets[0].features_after_transforms, float_dtype=float_dtype)
         self._weights = weights
         self._datasets = datasets
         self._dataset_map = cumsum([len(d) for d in self._datasets])
@@ -120,7 +123,8 @@ class CombinedAudioDataset(AudioDataset):
         dataset = self._datasets[target_dataset]
         if transforms is None:
             transforms = self._transforms if self._transforms is not None else dataset.transforms
-        return dataset.get(index, output_pattern=output_pattern or self._output_pattern, transforms=transforms, _global_index=global_index)
+        outs = dataset.get(index, output_pattern=output_pattern or self._output_pattern, transforms=transforms, _global_index=global_index)
+        return self._cast_outputs(outs)
 
     @AudioDataset.output_pattern.setter
     def output_pattern(self, pattern):

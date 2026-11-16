@@ -6,8 +6,9 @@ build-backend = "setuptools.build_meta"
 name = "acids_dataset"
 dynamic = ["version"]
 authors = [
-  { name="Axel Chemla Romeu Santos", email="chemla@ircam.fr" },
-  { name="Nils Demerlé", email="demerle@ircam.fr" },
+  { name="ACIDS", email="acids.paris@gmail.com"}, 
+  { name="Axel Chemla Romeu Santos"},
+  { name="Nils Demerlé"},
 ]
 description = "a fancy data & data loader manager for generative audio ML. Enables pre-processing, advanced loading, audio features & augmentations, balance & partitioning, curriculum learning."
 readme = "README.md"

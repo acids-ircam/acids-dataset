@@ -24,7 +24,10 @@ class PreprocessedAudioDataset(AudioDataset):
 
     If sr is given and differs from the sampling rate of the pre-processed audio, loaded audio (waveform of items,
     load_audio, get_fragment) is resampled to sr ; chunk_length and metadata['sr'] then refer to sr. Pre-processed
-    features are read as stored (they keep their own frame rate)."""
+    features are read as stored (they keep their own frame rate).
+
+    If float_dtype is given (e.g. torch.float32, "float16"), floating point outputs (waveforms, features...) are cast to
+    it ; None keeps loaded dtypes."""
     _default_partition_name = "partitions"
     # context (in stored samples) loaded around audio before resampling (see load_audio)
     _resampling_context = 256
@@ -57,6 +60,7 @@ class PreprocessedAudioDataset(AudioDataset):
                  max_samples: int | None = None,
                  db_path: str | None = None,
                  features_after_transforms: bool = True,
+                 float_dtype: torch.dtype | str | None = "float32",
                  **kwargs) -> None:
         # db_path kept for retro-compatibility
         path = path or db_path
@@ -67,7 +71,7 @@ class PreprocessedAudioDataset(AudioDataset):
             raise NotImplementedError()
         self._init_common(transforms=transforms, output_pattern=output_pattern, output_type=output_type, 
                           channels=channels, subindices=subindices, max_samples=max_samples,
-                          features_after_transforms=features_after_transforms)
+                          features_after_transforms=features_after_transforms, float_dtype=float_dtype)
         self._loader = get_writer_class_from_path(path).loader(self._db_path, output_type=output_type) 
         self._metadata = get_metadata_from_path(path)
         self._set_sr(sr)

@@ -58,9 +58,11 @@ def test_items(paths, dtype):
 
 def test_default_and_setter(paths):
     ds = _datasets(paths)["pre"]
-    assert ds.float_dtype is None and ds[0]['waveform'].dtype == torch.float32
+    assert ds.float_dtype == torch.float32 and ds[0]['waveform'].dtype == torch.float32
     ds.float_dtype = "double"
     assert ds[0]['waveform'].dtype == torch.float64
+    ds.float_dtype = None
+    assert ds.float_dtype is None
 
 
 def test_online_with_transforms(paths):

@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 from pathlib import Path
 import bisect
 import math
+import random
 import copy
 from absl import logging
 import torch
@@ -330,8 +331,34 @@ class CombinedAudioDataset(AudioDataset):
         assert self.parent is None, "dataset is already a partition"
         if features is not None:
             self._check_feature_in_subdatasets(features)
+        # maximum numbers of items apply to combined partitions : they are shared among datasets (see _share_max_items)
+        max_items = self._check_max_items(partitions, kwargs.pop('max_items', None))
         partitions_list = [d.split(partitions, features=features, **kwargs) for d in self._datasets]
+        if max_items:
+            seed = kwargs.get('seed')
+            rng = random.Random(seed) if seed is not None else random
+            shares = self._share_max_items(max_items, [{k: len(v) for k, v in parts.items()} for parts in partitions_list])
+            partitions_list = [d._cap_partitions(parts, share, partitions, features=features, rng=rng)
+                               for d, parts, share in zip(self._datasets, partitions_list, shares)]
         return {p: self._from_partitions([d[p] for d in partitions_list]) for p in partitions_list[0].keys()}
+
+    @staticmethod
+    def _share_max_items(max_items: Dict[str, int], sizes: List[Dict[str, int]]) -> List[Dict[str, int]]:
+        """shares maximum numbers of items of combined partitions among datasets, proportionally to the sizes of their
+        partitions (largest remainders get the remaining items)."""
+        shares = [{} for _ in sizes]
+        for k, cap in max_items.items():
+            counts = [s.get(k, 0) for s in sizes]
+            total = sum(counts)
+            if total <= cap:
+                for share, n in zip(shares, counts): share[k] = n
+                continue
+            exact = [cap * n / total for n in counts]
+            values = [int(math.floor(e)) for e in exact]
+            for i in sorted(range(len(exact)), key=lambda i: values[i] - exact[i])[:cap - sum(values)]:
+                values[i] += 1
+            for share, v in zip(shares, values): share[k] = v
+        return shares
 
     def load_partition(self, name: str | None = None, check: bool = False):
         partitions_list = [d.load_partition(name, check=check) for d in self._datasets]

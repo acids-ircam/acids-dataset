@@ -358,6 +358,46 @@ class PreprocessedAudioDataset(AudioDataset):
         subindices = {p: sorted(sum([list(groups[l]) for l in assignment.get(p, [])], [])) for p in partitions.keys()}
         return {p: self.get_subdataset(list(map(self._loader.keygen.from_str, subindices[p]))) for p in partitions.keys()}
 
+    def _cap_partitions(self, partitions: Dict[str, "PreprocessedAudioDataset"], max_items: Dict[str, int], ratios: Dict[str, float],
+                        features=None, rng=random) -> Dict[str, "PreprocessedAudioDataset"]:
+        """limits the number of items of partitions (see split). Items are moved by groups : values of hashed features if
+        partitions are grouped by features, original files if no file is shared between partitions, items otherwise."""
+        feature_hash = self._loader.feature_hash
+        categorical = [f for f in checklist(features or []) if f in feature_hash]
+        part_groups = {k: p._file_groups() for k, p in partitions.items()}
+        shared = set()
+        seen = set()
+        for groups in part_groups.values():
+            shared |= seen & set(groups.keys())
+            seen |= set(groups.keys())
+        key_labels = None
+        if categorical:
+            key_labels = {}
+            for f in categorical:
+                for value, keys in feature_hash[f].items():
+                    for key in keys:
+                        key_labels.setdefault(self._key_to_str(key), []).append(value)
+        members, weights, assignment = {}, {}, {}
+        for k, p in partitions.items():
+            keys = sorted(set(map(self._key_to_str, p._subindices)))
+            if key_labels is not None:
+                group_of = lambda key: ("group",) + tuple(key_labels.get(key, []))
+            elif not shared:
+                path_of = {key: path for path, path_keys in part_groups[k].items() for key in path_keys}
+                group_of = lambda key: ("file", str(path_of.get(key)))
+            else:
+                group_of = lambda key: ("item", key)
+            groups = {}
+            for key in keys:
+                groups.setdefault(group_of(key), []).append(key)
+            assignment[k] = sorted(groups.keys(), key=str)
+            for g, g_keys in groups.items():
+                members[g] = members.get(g, []) + g_keys
+                weights[g] = float(len(members[g]))
+        assignment = self._cap_assignment(assignment, weights, ratios, max_items, rng=rng)
+        return {k: self.get_subdataset([self._loader.keygen.from_str(key) for g in groups for key in sorted(members[g])])
+                for k, groups in assignment.items()}
+
     def _split_without_feature(self, partitions, _rng=random, by: str = "auto", tolerance: float = 0.1):
         if by != "items":
             groups = self._file_groups()
@@ -544,7 +584,8 @@ class PreprocessedAudioDataset(AudioDataset):
               write: str | bool | None = None,
               seed: int | None = None,
               n_bins: int = 10,
-              by: str = "auto"):
+              by: str = "auto",
+              max_items: Dict[str, int] | None = None):
         """splits the dataset in partitions. If seed is given, partitions are reproducible (e.g. identical across
         processes of distributed training) ; otherwise, they are drawn with the global random state. Features can be
         hashed (categorical) features, whose values are kept in a single partition, and at most one other (continuous)
@@ -553,9 +594,16 @@ class PreprocessedAudioDataset(AudioDataset):
         by is the unit of random and stratified partitions (without hashed features) : "files" (all the items of an
         original file belong to the same partition), "items" (items are partitioned independently ; items of a file, that
         may overlap, can then be in several partitions), or "auto" (default : "files", unless the size of a partition
-        would deviate from its ratio by more than tolerance, e.g. for datasets with few files ; then "items")."""
+        would deviate from its ratio by more than tolerance, e.g. for datasets with few files ; then "items").
+
+        max_items gives the maximum number of items of some partitions (e.g. {"valid": 200}) : items above it are moved to
+        the partitions without maximum (following their ratios), by groups (feature values, original files if no file is 
+        shared between partitions, or items), such that partitions may have less items than their maximum. At least one 
+        partition must have no maximum."""
         assert not self.is_partition, "dataset is already a partition of an existing dataset."
         self._check_split_by(by)
+        ratios = partitions
+        max_items = self._check_max_items(partitions, max_items)
         rng = random.Random(seed) if seed is not None else random
 
         # first, try to load if required
@@ -564,6 +612,7 @@ class PreprocessedAudioDataset(AudioDataset):
             try: 
                 partitions = self.load_partition(load_if_available)
                 if features is not None: logging.warning("found partition to load, but features was not None; feature-based partitioning ignored")
+                if max_items: logging.warning("found partition to load : max_items is ignored")
                 return partitions
             except FileNotFoundError: 
                 pass
@@ -575,6 +624,8 @@ class PreprocessedAudioDataset(AudioDataset):
                 if use_meta_if_available in self.feature_hash: 
                     partitions = self._split_from_feature(use_meta_if_available, **partitions)
                     if features is not None: logging.warning("found partition to load, but features was not None; feature-based partitioning ignored")
+                    if max_items:
+                        partitions = self._cap_partitions(partitions, max_items, ratios, features=[use_meta_if_available], rng=rng)
                     return partitions
             except Exception as e: 
                 logging.warning('Could not find partition using feature %s. Creating new partition'%use_meta_if_available)
@@ -585,6 +636,8 @@ class PreprocessedAudioDataset(AudioDataset):
         else:
             partitions = self._split_with_features(partitions, features, tolerance = tolerance, balance_cardinality=balance_cardinality, rng=rng,
                                                    n_bins=n_bins, by=by)
+        if max_items:
+            partitions = self._cap_partitions(partitions, max_items, ratios, features=features, rng=rng)
         if write:            self._write_partition(partitions, write)
         return partitions
 

@@ -1091,6 +1091,37 @@ class OnlineAudioDataset(AudioDataset):
             assert p in feature_hash[partition_key], "partition %s not found in %s"%(p, partition_key)
         return {p: feature_hash[partition_key][p] for p in partitions}
 
+    def _cap_partitions(self, partitions: Dict[str, "OnlineAudioDataset"], max_items: Dict[str, int], ratios: Dict[str, float],
+                        features=None, rng=random) -> Dict[str, "OnlineAudioDataset"]:
+        """limits the number of items of partitions (see split). Items are moved by the unit of the split : items for
+        partitions split by items, files (or groups of files with the same values of path-based features) otherwise."""
+        by_items = any(p.item_subindices is not None for p in partitions.values())
+        categorical = [f for f in checklist(features or []) if f in self.path_features]
+        members, weights, assignment = {}, {}, {}
+        for k, p in partitions.items():
+            assignment[k] = []
+            if by_items:
+                units = [(tuple(i), [tuple(i)], 1.) for i in p._all_items()]
+            else:
+                units = [(f, [f], float(self._n_chunks_for_file(self._files[f]))) for f in p.file_indices]
+                if categorical:
+                    # files with the same feature values stay in the same partition
+                    grouped = {}
+                    for f, _, w in units:
+                        key = ("group",) + tuple(self._file_feature_value(f, c) for c in categorical)
+                        files, weight = grouped.get(key, ([], 0.))
+                        grouped[key] = (files + [f], weight + w)
+                    units = [(key, files, w) for key, (files, w) in grouped.items()]
+            for key, unit_members, w in units:
+                members[key], weights[key] = unit_members, w
+                assignment[k].append(key)
+        assignment = self._cap_assignment(assignment, weights, ratios, max_items, rng=rng)
+        capped = {}
+        for k, groups in assignment.items():
+            units = [m for g in groups for m in members[g]]
+            capped[k] = self.get_item_subdataset(units) if by_items else self.get_subdataset(units)
+        return capped
+
     def _write_partition(self, partitions: Dict[str, "OnlineAudioDataset"], write: str | bool) -> None:
         partition_path = self._partition_path(write)
         os.makedirs(partition_path.parent, exist_ok=True)
@@ -1117,7 +1148,8 @@ class OnlineAudioDataset(AudioDataset):
               write: str | bool | None = None,
               seed: int | None = None,
               n_bins: int = 10,
-              by: str = "auto") -> Dict[str, "OnlineAudioDataset"]:
+              by: str = "auto",
+              max_items: Dict[str, int] | None = None) -> Dict[str, "OnlineAudioDataset"]:
         """splits the dataset in partitions, by files or by items.
 
         Args:
@@ -1128,6 +1160,10 @@ class OnlineAudioDataset(AudioDataset):
                 tolerance, e.g. for datasets with few files ; then "items"). Partitions split by items are only valid for
                 the chunk_length and batch_by they were split with. Partitions grouped by path-based features are always
                 split by files. Defaults to "auto".
+            max_items (Dict[str, int] | None, optional): maximum number of items of given partitions (e.g. {"valid": 200}) : 
+                items above it are moved to the partitions without maximum (following their ratios). Items are moved by the 
+                unit of the split (items, files, or groups of path-based feature values), such that partitions may have 
+                less items than their maximum. At least one partition must have no maximum. Defaults to None.
             features (List[str] | None, optional): path-based features (original_path, or meta_regexp features) used to group 
                 files, such that each feature value belongs to a single partition. A computed (continuous) feature can also be 
                 given (e.g. loudness) : partitions are then stratified over its values (see n_bins). Defaults to None.
@@ -1146,12 +1182,14 @@ class OnlineAudioDataset(AudioDataset):
         """
         assert not self.is_partition, "dataset is already a partition of an existing dataset."
         self._check_split_by(by)
+        max_items = self._check_max_items(partitions, max_items)
         self._check_loading_params()
         rng = random.Random(seed) if seed is not None else random
         if load_if_available:
             name = None if load_if_available is True else load_if_available
             if self.has_partition(name):
                 if features is not None: logging.warning("found partition to load, but features was not None; feature-based partitioning ignored")
+                if max_items: logging.warning("found partition to load : max_items is ignored")
                 return self.load_partition(name)
 
         assignment = None
@@ -1171,7 +1209,10 @@ class OnlineAudioDataset(AudioDataset):
                                                        rng=rng, n_bins=n_bins, by=by)
         unit, assignment = assignment
         get_subdataset = self.get_item_subdataset if unit == "items" else self.get_subdataset
+        ratios = partitions
         partitions = {k: get_subdataset(v) for k, v in assignment.items()}
+        if max_items:
+            partitions = self._cap_partitions(partitions, max_items, ratios, features=features, rng=rng)
         if write: 
             self._write_partition(partitions, write)
         return partitions

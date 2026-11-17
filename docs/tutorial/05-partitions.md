@@ -24,6 +24,12 @@ print({name: len(p) for name, p in by_files.items()}, {name: len(p) for name, p 
 
 Splitting by files avoids sharing audio between partitions, but with a few files partition sizes can be far from the ratios. With `by="auto"` (default), datasets are split by files, unless a partition would deviate from its ratio by more than `tolerance` (10 % by default) : they are then split by items.
 
+`max_items` limits the size of some partitions, e.g. a validation set of at most 200 items, whatever the size of the dataset (remaining items go to the other partitions) :
+
+```python
+partitions = dataset.split({"train": 0.9, "valid": 0.1}, max_items={"valid": 200}, seed=0)
+```
+
 ## Partitions by feature
 
 With `features`, each value of a feature belongs to a single partition. With `balance_cardinality`, partition sizes follow the ratios as closely as possible :

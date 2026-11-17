@@ -603,7 +603,7 @@ def test_search_multiple_features(instrument_dataset):
 def test_split(instrument_dataset, batch_by, features, balance_cardinality):
     ds = AudioDataset(instrument_dataset, meta_regexp=INSTRUMENT_REGEXP, chunk_length=1., batch_by=batch_by)
     target = {"train": 0.7, "valid": 0.3}
-    partitions = ds.split(target, features=features, balance_cardinality=balance_cardinality, write="test_split")
+    partitions = ds.split(target, features=features, balance_cardinality=balance_cardinality, write="test_split", by="files")
     assert set(partitions.keys()) == set(target.keys())
     files = {k: set(v.file_indices) for k, v in partitions.items()}
     assert files["train"].isdisjoint(files["valid"])

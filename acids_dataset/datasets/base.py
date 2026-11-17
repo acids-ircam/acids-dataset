@@ -447,6 +447,57 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
         return by
 
     @staticmethod
+    def _check_max_items(partitions: Dict[str, float], max_items: Dict[str, int] | None) -> Dict[str, int] | None:
+        """checks maximum numbers of items of partitions : at least one partition must have no maximum, such that
+        items above maximums belong to a partition."""
+        if not max_items:
+            return None
+        unknown = set(max_items) - set(partitions)
+        if unknown:
+            raise ValueError("max_items given for unknown partitions %s (partitions : %s)"%(sorted(unknown), list(partitions)))
+        if any(int(v) < 0 for v in max_items.values()):
+            raise ValueError("max_items must be positive, got %s"%max_items)
+        if set(max_items) >= set(partitions):
+            raise ValueError("max_items is given for every partition (%s) : items above maximums would belong to no partition. "
+                             "Leave at least one partition without maximum (e.g. max_items={'valid': 200})"%max_items)
+        return {k: int(v) for k, v in max_items.items()}
+
+    @staticmethod
+    def _cap_assignment(assignment: Dict[str, List[Any]], weights: Dict[Any, float], ratios: Dict[str, float],
+                        max_items: Dict[str, int], rng=random) -> Dict[str, List[Any]]:
+        """limits the number of items (sum of group weights) of partitions with a maximum : groups of these partitions are
+        kept in random order while they fit, and other ones are moved to partitions without maximum (to the one with the
+        largest deficit with respect to its ratio). Groups are never divided, such that capped partitions may have less
+        items than their maximum."""
+        assignment = {k: list(v) for k, v in assignment.items()}
+        moved = []
+        for k, cap in max_items.items():
+            groups = assignment.get(k, [])
+            if sum(weights[g] for g in groups) <= cap:
+                continue
+            shuffled = list(groups)
+            rng.shuffle(shuffled)
+            kept, current = set(), 0.
+            for g in shuffled:
+                if current + weights[g] <= cap:
+                    kept.add(g)
+                    current += weights[g]
+                else:
+                    moved.append(g)
+            assignment[k] = [g for g in groups if g in kept]
+        uncapped = [k for k in ratios if k not in max_items]
+        for k in uncapped: assignment.setdefault(k, [])
+        total_ratio = sum(ratios[k] for k in uncapped)
+        shares = {k: (ratios[k] / total_ratio if total_ratio > 0 else 1. / len(uncapped)) for k in uncapped}
+        current = {k: sum(weights[g] for g in assignment[k]) for k in uncapped}
+        for g in moved:
+            total = sum(current.values()) + weights[g]
+            k = max(uncapped, key=lambda k: shares[k] * total - current[k])
+            assignment[k].append(g)
+            current[k] += weights[g]
+        return assignment
+
+    @staticmethod
     def _is_balanced(groups: List[Any], weights: List[float], assignment: Dict[str, List[Any]], ratios: Dict[str, float],
                      tolerance: float = 0.1) -> bool:
         """True if partition weights of an assignment follow ratios, within a relative tolerance (and no partition with a

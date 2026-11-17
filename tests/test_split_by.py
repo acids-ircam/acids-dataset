@@ -116,3 +116,47 @@ def test_online_item_partitions_persistence(uneven, tmp_path):
     assert len(parts["train"].configure(chunk_length=CHUNK)) == len(parts["train"])
     with pytest.raises(ValueError):
         ds.configure(chunk_length=CHUNK * 2).load_partition("by_items")
+
+
+# maximum number of items of partitions
+
+@pytest.mark.parametrize("mode", ["online", "preprocessed"])
+@pytest.mark.parametrize("by", ["items", "files"])
+def test_split_max_items(even, mode, by):
+    ds = load(even, mode)
+    ratios = {"train": 0.5, "valid": 0.3, "test": 0.2}
+    parts = ds.split(ratios, seed=0, by=by, max_items={"valid": 3}, use_meta_if_available=False)
+    assert sum(len(p) for p in parts.values()) == len(ds)
+    if by == "items":
+        assert len(parts["valid"]) == 3
+    else:
+        # files are moved as a whole : valid has at most 3 items, and no file is shared
+        assert 0 < len(parts["valid"]) <= 3 and is_split_by_files(parts, mode)
+    # items above the maximum are given to other partitions, following their ratios
+    assert len(parts["train"]) > len(parts["test"])
+    # partitions are reproducible
+    again = ds.split(ratios, seed=0, by=by, max_items={"valid": 3}, use_meta_if_available=False)
+    assert {k: len(v) for k, v in again.items()} == {k: len(v) for k, v in parts.items()}
+    # maximums above partition sizes do not change partitions
+    uncapped = ds.split(ratios, seed=0, by=by, use_meta_if_available=False)
+    capped = ds.split(ratios, seed=0, by=by, max_items={"valid": len(ds)}, use_meta_if_available=False)
+    assert {k: len(v) for k, v in capped.items()} == {k: len(v) for k, v in uncapped.items()}
+
+
+@pytest.mark.parametrize("mode", ["online", "preprocessed"])
+def test_split_max_items_errors(even, mode):
+    ds = load(even, mode)
+    with pytest.raises(ValueError):
+        # every partition has a maximum : items above them would belong to no partition
+        ds.split(RATIOS, max_items={"train": 10, "valid": 2})
+    with pytest.raises(ValueError):
+        ds.split(RATIOS, max_items={"test": 2})
+
+
+def test_split_max_items_combined(even):
+    from acids_dataset.datasets import CombinedAudioDataset
+    combined = CombinedAudioDataset([load(even, "online"), load(even, "preprocessed")])
+    parts = combined.split(RATIOS, seed=0, by="items", max_items={"valid": 5}, use_meta_if_available=False)
+    assert len(parts["valid"]) == 5
+    assert len(parts["train"]) + len(parts["valid"]) == len(combined)
+    assert CombinedAudioDataset._share_max_items({"valid": 5}, [{"valid": 8}, {"valid": 2}]) == [{"valid": 4}, {"valid": 1}]

@@ -654,7 +654,7 @@ def test_partition_files(instrument_dataset, tmp_path):
     index_dir = tmp_path / "indexes"
     ds = AudioDataset(instrument_dataset, index_dir=index_dir, chunk_length=1.)
     assert ds.partition_dir == index_dir / "partitions"
-    ds.split({"train": 0.5, "valid": 0.5}, write=True)
+    ds.split({"train": 0.5, "valid": 0.5}, write=True, by="files")
     assert (index_dir / "partitions" / "partitions.json").exists()
     assert ds.has_partition("partitions") and not ds.has_partition("other")
     with pytest.raises(FileNotFoundError):

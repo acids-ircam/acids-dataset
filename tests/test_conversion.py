@@ -79,7 +79,7 @@ def test_conversion_parameters(raw):
 def test_partitions(raw):
     dataset = online(raw)
     dataset.split({"train": 0.7, "valid": 0.3}, features=["instrument"], seed=0, write="by_instrument")
-    dataset.split({"train": 0.5, "valid": 0.5}, seed=1, write="random")
+    dataset.split({"train": 0.5, "valid": 0.5}, seed=1, by="files", write="random")
     pre = dataset.preprocess(raw / "all")
     for name in ["by_instrument", "random"]:
         online_partitions, pre_partitions = dataset.load_partition(name), pre.load_partition(name)
@@ -97,7 +97,7 @@ def test_partitions(raw):
 
 def test_partition_conversion(raw):
     # a partition of an online dataset gives a pre-processed dataset of its files
-    train = online(raw).split({"train": 0.5, "valid": 0.5}, seed=0)["train"]
+    train = online(raw).split({"train": 0.5, "valid": 0.5}, seed=0, by="files")["train"]
     pre = train.preprocess(raw / "train")
     assert sorted(f['audio_path'] for f in pre.files) == sorted(train.files[i]['audio_path'] for i in train.file_indices)
 

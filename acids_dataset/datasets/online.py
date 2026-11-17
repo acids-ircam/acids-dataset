@@ -1297,6 +1297,9 @@ class OnlineAudioDataset(AudioDataset):
             raise ValueError("pre-processed datasets require a chunk_length (give it in constructor or configure)")
         if self.sr is None:
             raise ValueError("files have different sampling rates ; please provide sr to dataset")
+        if self.item_subindices is not None:
+            logging.warning("dataset is a partition split by items : the whole files of its items are pre-processed, including "
+                            "items of other partitions (split by files to pre-process partitions)")
         files = [self._files[i] for i in self.file_indices]
         excluded = []
         if exclude_flags:

@@ -428,7 +428,12 @@ def feature_from_gin_config(config_path, add_args=None):
 @gin.configurable(module="ad.transforms")
 def parse_transform(transform, add_args=None):
     if add_args is None: add_args = tuple(), dict()
-    return transform(*add_args[0], **add_args[1])
+    if isinstance(transform, list): 
+        return [t(*add_args[0], **add_args[1]) for t in transform]
+    elif isinstance(transform, dict): 
+        return {k: t(*add_args[0], **add_args[1]) for k, t in transform.items()}
+    else:
+        return transform(*add_args[0], **add_args[1])
 
 
 def transform_from_gin_config(config_path, add_args=None):

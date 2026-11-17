@@ -12,10 +12,12 @@ from acids_dataset.features import Loudness
 
 dataset = AudioDataset("tutorial_dataset", sr=22050, chunk_length=1., meta_regexp=["**/{{instrument}}_*.wav"],
                        features=[Loudness(sr=22050, keep_channels=False)], output_pattern="{waveform,loudness}")
-dataset.split({"train": 0.8, "valid": 0.2}, seed=0, write="split")
+dataset.split({"train": 0.8, "valid": 0.2}, by="files", seed=0, write="split")
 compiled = dataset.preprocess("tutorial_compiled", force=True)
 print(type(compiled).__name__, len(compiled), compiled.load_partition("split").keys())
 ```
+
+Partitions are transferred file by file : only partitions split by files (`by="files"`, or grouped by path-based features) can be transferred.
 
 ## From the command line or Python
 

@@ -10,7 +10,7 @@ import random, math, itertools
 import torchaudio
 from collections import deque
 import copy
-from typing import Optional, List , Dict, Iterable
+from typing import Any, Optional, List , Dict, Iterable
 from ..utils import checklist, pad, PadMode
 from .. import get_writer_class_from_path, get_metadata_from_path, get_fragment_class
 from .base import AudioDataset, TransformType, chunk_length_to_samples
@@ -338,8 +338,36 @@ class PreprocessedAudioDataset(AudioDataset):
         subdataset.parent = self
         return subdataset
 
-    def _split_without_feature(self, _rng=random, **kwargs):
-        ratios = {k: float(v) for k, v in kwargs.items()}
+    def _file_groups(self) -> Dict[Any, set]:
+        """{original_path: set of keys (as str)} of the items of the dataset."""
+        path_keys = self._loader.feature_hash.get('original_path')
+        if path_keys is None:
+            raise ValueError("dataset %s has no original_path feature, and cannot be split by files"%self.path)
+        current_keys = self._current_keys()
+        groups = {}
+        for path, keys in path_keys.items():
+            keys = set(map(self._key_to_str, keys))
+            if current_keys is not None:
+                keys &= current_keys
+            if keys:
+                groups[path] = keys
+        return groups
+
+    def _subdatasets_from_groups(self, groups: Dict[Any, set], assignment: Dict[str, List[Any]], partitions) -> Dict[str, "PreprocessedAudioDataset"]:
+        # keys are sorted, such that partitions are identical across processes
+        subindices = {p: sorted(sum([list(groups[l]) for l in assignment.get(p, [])], [])) for p in partitions.keys()}
+        return {p: self.get_subdataset(list(map(self._loader.keygen.from_str, subindices[p]))) for p in partitions.keys()}
+
+    def _split_without_feature(self, partitions, _rng=random, by: str = "auto", tolerance: float = 0.1):
+        if by != "items":
+            groups = self._file_groups()
+            files = _rng.sample(sorted(groups.keys(), key=str), k=len(groups))
+            weights = [float(len(groups[f])) for f in files]
+            assignment = self._assign_by_ratio(files, weights, partitions)
+            if by == "files" or self._is_balanced(files, weights, assignment, partitions, tolerance):
+                return self._subdatasets_from_groups(groups, assignment, partitions)
+            logging.info("splitting %d files would give unbalanced partitions (tolerance %s) : dataset is split by items"%(len(files), tolerance))
+        ratios = {k: float(v) for k, v in partitions.items()}
         n_items = len(self._loader) if not self._subindices else len(self._subindices)
         idx_perm = _rng.sample(range(n_items), k=n_items)
         current_idx = 0
@@ -398,8 +426,9 @@ class PreprocessedAudioDataset(AudioDataset):
             raise ValueError("partitions can only be stratified over one continuous feature, got %s"%continuous)
         return categorical, (continuous[0] if continuous else None)
 
-    def _split_stratified(self, partitions, partition_hash, feature_name, n_bins=10, rng=random):
-        """assigns groups of keys to partitions, stratified over the mean value of a continuous feature."""
+    def _split_stratified(self, partitions, partition_hash, feature_name, n_bins=10, rng=random, tolerance: float | None = None):
+        """assigns groups of keys to partitions, stratified over the mean value of a continuous feature. If tolerance is
+        given, returns None if partition sizes deviate from ratios by more than tolerance."""
         labels, weights, values = [], [], []
         n_missing = 0
         for label, keys in partition_hash.items():
@@ -414,16 +443,28 @@ class PreprocessedAudioDataset(AudioDataset):
         if n_missing > 0:
             logging.warning("%d items have no finite value for feature %s, and are not partitioned"%(n_missing, feature_name))
         assignment = self._assign_stratified(labels, weights, values, partitions, n_bins=n_bins, rng=rng)
-        subindices = {p: sorted(sum([list(partition_hash[l]) for l in assignment[p]], [])) for p in partitions.keys()}
-        return {p: self.get_subdataset(list(map(self._loader.keygen.from_str, subindices[p]))) for p in partitions.keys()}
+        if tolerance is not None and not self._is_balanced(labels, weights, assignment, partitions, tolerance):
+            return None
+        return self._subdatasets_from_groups(partition_hash, assignment, partitions)
 
-    def _split_with_features(self, partitions, features, tolerance=0.1, balance_cardinality = False, rng=random, n_bins=10):
+    def _split_with_features(self, partitions, features, tolerance=0.1, balance_cardinality = False, rng=random, n_bins=10, by: str = "auto"):
         features, continuous = self._sort_split_features(features)
         if continuous is not None and len(features) == 0:
+            if by != "items":
+                # files are stratified over the continuous feature
+                groups = {(path,): keys for path, keys in self._file_groups().items()}
+                split = self._split_stratified(partitions, groups, continuous, n_bins=n_bins, rng=rng,
+                                               tolerance=None if by == "files" else tolerance)
+                if split is not None:
+                    return split
+                logging.info("splitting %d files would give unbalanced partitions (tolerance %s) : dataset is split by items"%(len(groups), tolerance))
             # items are stratified over the continuous feature
             keys = self._current_keys()
             keys = sorted(keys) if keys is not None else [self._key_to_str(k) for k in self._loader._keys]
             return self._split_stratified(partitions, {(k,): {k} for k in keys}, continuous, n_bins=n_bins, rng=rng)
+        if by != "auto":
+            logging.warning("by=%r is ignored for partitions grouped by hashed features (give original_path in features to keep "
+                            "the items of a file in the same partition)"%by)
         # make partition hash : {(value_1, ..., value_n): set of keys (as str)}
         feature_hash = self._loader.feature_hash
         for f in features:
@@ -502,12 +543,19 @@ class PreprocessedAudioDataset(AudioDataset):
               tolerance: float = 0.1, 
               write: str | bool | None = None,
               seed: int | None = None,
-              n_bins: int = 10): 
-        """splits the dataset in partitions. If seed is given, partitions are reproducible (e.g. identical across 
-        processes of distributed training) ; otherwise, they are drawn with the global random state. Features can be 
-        hashed (categorical) features, whose values are kept in a single partition, and at most one other (continuous) 
-        feature, over which partitions are stratified with n_bins histogram (quantile) bins."""
+              n_bins: int = 10,
+              by: str = "auto"):
+        """splits the dataset in partitions. If seed is given, partitions are reproducible (e.g. identical across
+        processes of distributed training) ; otherwise, they are drawn with the global random state. Features can be
+        hashed (categorical) features, whose values are kept in a single partition, and at most one other (continuous)
+        feature, over which partitions are stratified with n_bins histogram (quantile) bins.
+
+        by is the unit of random and stratified partitions (without hashed features) : "files" (all the items of an
+        original file belong to the same partition), "items" (items are partitioned independently ; items of a file, that
+        may overlap, can then be in several partitions), or "auto" (default : "files", unless the size of a partition
+        would deviate from its ratio by more than tolerance, e.g. for datasets with few files ; then "items")."""
         assert not self.is_partition, "dataset is already a partition of an existing dataset."
+        self._check_split_by(by)
         rng = random.Random(seed) if seed is not None else random
 
         # first, try to load if required
@@ -533,9 +581,10 @@ class PreprocessedAudioDataset(AudioDataset):
                 
         # fetch by features
         if features is None:
-            partitions = self._split_without_feature(_rng=rng, **partitions)
+            partitions = self._split_without_feature(partitions, _rng=rng, by=by, tolerance=tolerance)
         else:
-            partitions = self._split_with_features(partitions, features, tolerance = tolerance, balance_cardinality=balance_cardinality, rng=rng, n_bins=n_bins)
+            partitions = self._split_with_features(partitions, features, tolerance = tolerance, balance_cardinality=balance_cardinality, rng=rng,
+                                                   n_bins=n_bins, by=by)
         if write:            self._write_partition(partitions, write)
         return partitions
 

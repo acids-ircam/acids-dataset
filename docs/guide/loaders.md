@@ -9,6 +9,23 @@ loader = dataset.get_loader(batch_size=16, max_samples=10000, replacement=True) 
 
 The chunk length of pre-processed datasets is fixed at compilation : giving a different `chunk_length` to `get_loader` raises an error. With `sr` (see [Pre-processed mode](datasets.md#pre-processed-mode)), it is given in samples at the loaded sampling rate.
 
+## Persistent index shuffling
+
+`shuffle=True` draws a new order of items at each epoch. To shuffle the indices of a dataset once and for all, give `shuffle_idx` (to any dataset, online, pre-processed or combined) : `dataset[i]` is then the item at a fixed random position, identical in every epoch, worker and process.
+
+```python
+dataset = AudioDataset("my_dataset", shuffle_idx=42)       # seed of the permutation : same order in every session
+dataset = AudioDataset("my_dataset", shuffle_idx=True)     # random seed, given by dataset.shuffle_idx
+dataset.shuffle_idx = 42                                    # set afterwards (None or False to remove it)
+shuffled = dataset.configure(shuffle_idx=42)                # shuffled copy
+loader = dataset.get_loader(batch_size=16, shuffle=False, shuffle_idx=42)  # iterate in the persistent order
+```
+
+- The permutation only depends on the seed and on the length of the dataset : it follows changes of length (e.g. `chunk_length` in online mode).
+- Item labels and sampling weights (`item_labels`, `sampling_weights`, balanced samplers) follow the permuted indices. "index" entries of [output patterns](output-patterns.md) give permuted indices.
+- Partitions do not depend on `shuffle_idx` (the same items are in the same partitions), and keep the seed of the split dataset : items of each partition are shuffled over its own length. Setting `shuffle_idx` on a dataset does not change partitions already split from it.
+- Combined datasets shuffle their own indices, on top of the indices of combined datasets (that may also be shuffled).
+
 ## Chunking strategy (online mode)
 
 In online mode, dataset items are chunks of `chunk_length` samples, that can be given at initialization, or later with `configure` or `get_loader` (that return configured copies of the dataset). The way chunks are distributed in the dataset is set by `batch_by` :

@@ -10,7 +10,19 @@ partitions = dataset.split({"train": 0.8, "valid": 0.2}, seed=0)
 print({name: len(p) for name, p in partitions.items()})
 ```
 
-Online datasets split files : chunks of a file always belong to the same partition. With `seed`, partitions are reproducible, which is essential in distributed training (every process must get the same partitions).
+With `seed`, partitions are reproducible, which is essential in distributed training (every process must get the same partitions).
+
+## Files or items
+
+`by` chooses whether files or items are partitioned :
+
+```python
+by_files = dataset.split({"train": 0.8, "valid": 0.2}, by="files", seed=0)   # chunks of a file belong to the same partition
+by_items = dataset.split({"train": 0.8, "valid": 0.2}, by="items", seed=0)   # chunks are partitioned independently
+print({name: len(p) for name, p in by_files.items()}, {name: len(p) for name, p in by_items.items()})
+```
+
+Splitting by files avoids sharing audio between partitions, but with a few files partition sizes can be far from the ratios. With `by="auto"` (default), datasets are split by files, unless a partition would deviate from its ratio by more than `tolerance` (10 % by default) : they are then split by items.
 
 ## Partitions by feature
 

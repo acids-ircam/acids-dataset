@@ -34,7 +34,10 @@ def partition_signature(partitions):
     """partitions as comparable lists, in item order."""
     signature = {}
     for name, p in partitions.items():
-        if hasattr(p, "file_indices"):
+        if getattr(p, "item_subindices", None) is not None:
+            # online partitions split by items
+            signature[name] = [tuple(i) for i in p.item_subindices]
+        elif hasattr(p, "file_indices"):
             signature[name] = list(p.file_indices)
         else:
             signature[name] = [k if isinstance(k, (str, bytes)) else int(k) for k in p._subindices]

@@ -415,6 +415,52 @@ class OnlineAudioDataset(AudioDataset):
         for file_idx in self.file_indices:
             n_chunks += self._n_chunks_for_file(self._files[file_idx])
             self._cum_chunks.append(n_chunks)
+        self._check_item_partition()
+
+    # item partitions (see split with by="items") : items are (file index, chunk index) pairs, valid for given loading parameters
+
+    @property
+    def item_subindices(self) -> List[tuple] | None:
+        """(file index, chunk index) of items for partitions split by items, None otherwise."""
+        items = getattr(self, "_item_subindices", None)
+        return None if items is None else list(items)
+
+    def _item_params(self) -> Dict[str, Any]:
+        return {'chunk_length': self.chunk_length, 'batch_by': self.batch_by}
+
+    def _check_item_partition(self) -> None:
+        if getattr(self, "_item_subindices", None) is None:
+            return
+        if self._item_params() != self._item_partition_params:
+            raise ValueError("partition split by items is defined for %s, and cannot be used with %s (split by files, or split "
+                             "again with the new loading parameters)"%(self._item_partition_params, self._item_params()))
+
+    def _all_items(self) -> List[tuple]:
+        """(file index, chunk index) of every item, in order."""
+        items = getattr(self, "_item_subindices", None)
+        if items is not None:
+            return list(items)
+        return [(f, c) for f in self.file_indices for c in range(self._n_chunks_for_file(self._files[f]))]
+
+    def _item_location(self, index: int) -> tuple:
+        """(file index, chunk index) of an item."""
+        items = getattr(self, "_item_subindices", None)
+        if items is not None:
+            return items[index]
+        position = bisect.bisect_right(self._cum_chunks, index)
+        return self.file_indices[position], index - (self._cum_chunks[position - 1] if position > 0 else 0)
+
+    def _chunk_slot(self, file_idx: int, chunk_idx: int) -> tuple:
+        """(start, end) bounds of the start position (seconds) of a chunk : each chunk is sampled in its slot, without
+        exceeding the file if possible."""
+        n_chunks = self._n_chunks_for_file(self._files[file_idx])
+        duration = self._files[file_idx]['duration']
+        chunk_duration = self.chunk_length / self.sr
+        slot_length = duration / n_chunks
+        max_start = max(0., duration - chunk_duration)
+        slot_start = min(chunk_idx * slot_length, max_start)
+        slot_end = min(slot_start + max(0., slot_length - chunk_duration), max_start)
+        return slot_start, slot_end
 
     def configure(self, chunk_length: int | float | None = None, batch_by: BatchByType | None = None, pad_mode: PadMode | str | None = None, 
                   features_after_transforms: bool | None = None, **kwargs) -> "OnlineAudioDataset":
@@ -434,28 +480,22 @@ class OnlineAudioDataset(AudioDataset):
 
     def __len__(self):
         self._check_loading_params()
+        items = getattr(self, "_item_subindices", None)
+        if items is not None:
+            return len(items)
         return self._cum_chunks[-1] if len(self._cum_chunks) > 0 else 0
 
     def chunk_position(self, index: int, random_offset: bool = True):
-        """returns (file index, start position in seconds) of a given item. If random_offset is False, the 
+        """returns (file index, start position in seconds) of a given item. If random_offset is False, the
         chunk is taken at the beginning of its slot."""
         self._check_loading_params()
         if index < 0: index += len(self)
         if not (0 <= index < len(self)):
             raise IndexError("index %d out of range for dataset of length %d"%(index, len(self)))
-        position = bisect.bisect_right(self._cum_chunks, index)
-        file_idx = self.file_indices[position]
+        file_idx, chunk_idx = self._item_location(index)
         if self._chunk_length is None:
             return file_idx, 0.
-        n_chunks = self._n_chunks_for_file(self._files[file_idx])
-        chunk_idx = index - (self._cum_chunks[position - 1] if position > 0 else 0)
-        duration = self._files[file_idx]['duration']
-        chunk_duration = self.chunk_length / self.sr
-        # each chunk is sampled in its slot, without exceeding the file if possible
-        slot_length = duration / n_chunks
-        max_start = max(0., duration - chunk_duration)
-        slot_start = min(chunk_idx * slot_length, max_start)
-        slot_end = min(slot_start + max(0., slot_length - chunk_duration), max_start)
+        slot_start, slot_end = self._chunk_slot(file_idx, chunk_idx)
         start = random.uniform(slot_start, slot_end) if random_offset else slot_start
         return file_idx, start
 
@@ -524,7 +564,7 @@ class OnlineAudioDataset(AudioDataset):
         self._check_loading_params()
         computed = {f.feature_name: f for f in self._features}
         files = self.file_indices
-        n_items = [self._cum_chunks[p] - (self._cum_chunks[p - 1] if p > 0 else 0) for p in range(len(files))]
+        item_files = [f for f, _ in self._all_items()]
         per_feature = []
         for f in checklist(features):
             if f in self.path_features:
@@ -533,7 +573,8 @@ class OnlineAudioDataset(AudioDataset):
                 file_labels = bin_values([self._file_feature_mean(i, computed[f]) for i in files], n_bins=n_bins)
             else:
                 raise ValueError("feature %s cannot be used for labels ; available features : %s"%(f, self.path_features + list(computed.keys())))
-            per_feature.append([l for l, n in zip(file_labels, n_items) for _ in range(n)])
+            file_labels = dict(zip(files, file_labels))
+            per_feature.append([file_labels[i] for i in item_files])
         return self._combine_labels(per_feature)
 
     def _computed_features(self):
@@ -829,10 +870,19 @@ class OnlineAudioDataset(AudioDataset):
         """returns dataset item indices corresponding to given files."""
         self._check_loading_params()
         positions = {f: p for p, f in enumerate(self.file_indices)}
+        file_items = None
+        if getattr(self, "_item_subindices", None) is not None:
+            # partitions split by items : items of a file may not be contiguous
+            file_items = {}
+            for i, (f, _) in enumerate(self._item_subindices):
+                file_items.setdefault(f, []).append(i)
         items = []
         for f in file_indices:
-            if f not in positions: 
+            if f not in positions:
                 raise IndexError("file %d not in dataset"%f)
+            if file_items is not None:
+                items.extend(file_items[f])
+                continue
             p = positions[f]
             items.extend(range(self._cum_chunks[p - 1] if p > 0 else 0, self._cum_chunks[p]))
         return items
@@ -878,6 +928,26 @@ class OnlineAudioDataset(AudioDataset):
                     raise IndexError("file index %d out of range"%i)
         subdataset = copy.copy(self)
         subdataset._subindices = subindices
+        subdataset._item_subindices = None
+        subdataset.parent = self
+        subdataset._build_chunk_map()
+        return subdataset
+
+    def get_item_subdataset(self, items: Iterable[tuple], check: bool = False) -> "OnlineAudioDataset":
+        """returns a dataset restricted to given items, as (file index, chunk index) pairs. The returned dataset is only
+        valid for the current chunk_length and batch_by (as chunks of files depend on them)."""
+        self._check_loading_params()
+        items = sorted(set((int(f), int(c)) for f, c in items))
+        if check:
+            for f, c in items:
+                if not (0 <= f < len(self._files)):
+                    raise IndexError("file index %d out of range"%f)
+                if not (0 <= c < self._n_chunks_for_file(self._files[f])):
+                    raise IndexError("chunk %d out of range for file %d"%(c, f))
+        subdataset = copy.copy(self)
+        subdataset._subindices = sorted(set(f for f, _ in items))
+        subdataset._item_subindices = items
+        subdataset._item_partition_params = self._item_params()
         subdataset.parent = self
         subdataset._build_chunk_map()
         return subdataset
@@ -888,9 +958,28 @@ class OnlineAudioDataset(AudioDataset):
             return [float(self._n_chunks_for_file(self._files[i])) for i in file_indices]
         return [self._files[i]['duration'] for i in file_indices]
 
-    def _split_without_feature(self, partitions: Dict[str, float], rng=random) -> Dict[str, List[int]]:
-        files = rng.sample(self.file_indices, k=len(self.file_indices))
-        return self._assign_by_ratio(files, self._file_weights(files), partitions)
+    def _items_are_files(self) -> bool:
+        """True if every file gives a single item (whole files, or batch_by="files"), such that splitting by items or by
+        files is equivalent."""
+        return self._chunk_length is None or self._batch_by == "files"
+
+    def _resolve_split_by(self, by: str) -> str:
+        by = self._check_split_by(by)
+        return "files" if self._items_are_files() else by
+
+    def _split_without_feature(self, partitions: Dict[str, float], rng=random, by: str = "auto", tolerance: float = 0.1) -> tuple:
+        """returns ("files", {partition: file indices}) or ("items", {partition: (file index, chunk index) pairs})."""
+        by = self._resolve_split_by(by)
+        if by != "items":
+            files = rng.sample(self.file_indices, k=len(self.file_indices))
+            weights = self._file_weights(files)
+            assignment = self._assign_by_ratio(files, weights, partitions)
+            if by == "files" or self._is_balanced(files, weights, assignment, partitions, tolerance):
+                return "files", assignment
+            logging.info("splitting %d files would give unbalanced partitions (tolerance %s) : dataset is split by items"%(len(files), tolerance))
+        items = self._all_items()
+        rng.shuffle(items)
+        return "items", self._assign_by_ratio(items, [1.] * len(items), partitions)
 
     def _sort_split_features(self, features: List[str]) -> tuple:
         """separates path-based (categorical) features from computed (continuous) features."""
@@ -907,16 +996,43 @@ class OnlineAudioDataset(AudioDataset):
     def _file_feature_mean(self, file_idx: int, feature) -> float:
         """mean of a computed feature over the items of a file (taken at the beginning of their slots, or whole files 
         if chunk_length is None)."""
-        if self._chunk_length is None:
-            starts = [0.]
-        else:
-            file = self._files[file_idx]
-            n_chunks = self._n_chunks_for_file(file)
-            starts = [min(i * file['duration'] / n_chunks, max(0., file['duration'] - self.chunk_length / self.sr)) for i in range(n_chunks)]
-        values = [self._reduce_feature_value(self.get_fragment(file_idx, start=s, length=self.chunk_length, features=[feature]).get(feature.feature_name)) 
-                  for s in starts]
+        n_chunks = 1 if self._chunk_length is None else self._n_chunks_for_file(self._files[file_idx])
+        values = [self._item_feature_value(file_idx, c, feature) for c in range(n_chunks)]
         values = [v for v in values if np.isfinite(v)]
         return float(np.mean(values)) if values else float("nan")
+
+    def _item_feature_value(self, file_idx: int, chunk_idx: int, feature) -> float:
+        """value of a computed feature on an item (taken at the beginning of its slot, or whole file if chunk_length is None)."""
+        start = 0. if self._chunk_length is None else self._chunk_slot(file_idx, chunk_idx)[0]
+        fragment = self.get_fragment(file_idx, start=start, length=self.chunk_length, features=[feature])
+        return self._reduce_feature_value(fragment.get(feature.feature_name))
+
+    def _split_stratified_items(self, partitions, feature_name: str, n_bins: int = 10, rng=random, by: str = "auto",
+                                tolerance: float = 0.1) -> tuple:
+        """stratifies files (or items, see split) over a continuous feature ; returns ("files" | "items", assignment)."""
+        feature = next(f for f in self._features if f.feature_name == feature_name)
+        by = self._resolve_split_by(by)
+        # feature values are computed once per item
+        item_values = {item: self._item_feature_value(*item, feature) for item in self._all_items()}
+        if by != "items":
+            files, weights, values = [], [], []
+            for f in self.file_indices:
+                file_values = [v for (i, _), v in item_values.items() if i == f and np.isfinite(v)]
+                if file_values:
+                    files.append(f)
+                    weights.append(self._file_weights([f])[0])
+                    values.append(float(np.mean(file_values)))
+            if len(files) < len(self.file_indices):
+                logging.warning("%d files have no finite value for feature %s, and are not partitioned"%(len(self.file_indices) - len(files), feature_name))
+            assignment = self._assign_stratified(files, weights, values, partitions, n_bins=n_bins, rng=rng)
+            if by == "files" or self._is_balanced(files, weights, assignment, partitions, tolerance):
+                return "files", {k: sorted(v) for k, v in assignment.items()}
+            logging.info("splitting %d files would give unbalanced partitions (tolerance %s) : dataset is split by items"%(len(files), tolerance))
+        items = [i for i, v in item_values.items() if np.isfinite(v)]
+        if len(items) < len(item_values):
+            logging.warning("%d items have no finite value for feature %s, and are not partitioned"%(len(item_values) - len(items), feature_name))
+        assignment = self._assign_stratified(items, [1.] * len(items), [item_values[i] for i in items], partitions, n_bins=n_bins, rng=rng)
+        return "items", {k: sorted(v) for k, v in assignment.items()}
 
     def _split_stratified(self, partitions, groups: Dict[Any, List[int]], feature_name: str, n_bins: int = 10, rng=random) -> Dict[str, List[int]]:
         feature = next(f for f in self._features if f.feature_name == feature_name)
@@ -937,11 +1053,15 @@ class OnlineAudioDataset(AudioDataset):
         assignment = self._assign_stratified(labels, weights, values, partitions, n_bins=n_bins, rng=rng)
         return {k: sorted(sum([groups[l] for l in v], [])) for k, v in assignment.items()}
 
-    def _split_with_features(self, partitions: Dict[str, float], features: List[str], tolerance: float = 0.1, balance_cardinality: bool = False, rng=random, n_bins: int = 10) -> Dict[str, List[int]]:
+    def _split_with_features(self, partitions: Dict[str, float], features: List[str], tolerance: float = 0.1, balance_cardinality: bool = False,
+                             rng=random, n_bins: int = 10, by: str = "auto") -> tuple:
+        """returns ("files", {partition: file indices}) or ("items", {partition: (file index, chunk index) pairs})."""
         features, continuous = self._sort_split_features(features)
         if continuous is not None and len(features) == 0:
-            # files are stratified over the continuous feature
-            return self._split_stratified(partitions, {(i,): [i] for i in self.file_indices}, continuous, n_bins=n_bins, rng=rng)
+            # files (or items) are stratified over the continuous feature
+            return self._split_stratified_items(partitions, continuous, n_bins=n_bins, rng=rng, by=by, tolerance=tolerance)
+        if self._resolve_split_by(by) == "items":
+            logging.warning("by='items' is ignored for partitions grouped by path-based features (that are file-level)")
         self._check_path_features(features)
         groups = {}
         n_missing = 0
@@ -955,14 +1075,14 @@ class OnlineAudioDataset(AudioDataset):
             logging.warning("%d files have no value for features %s, and are not partitioned"%(n_missing, features))
         if continuous is not None:
             # groups of categorical features are stratified over the continuous feature
-            return self._split_stratified(partitions, groups, continuous, n_bins=n_bins, rng=rng)
+            return "files", self._split_stratified(partitions, groups, continuous, n_bins=n_bins, rng=rng)
         labels = rng.sample(list(groups.keys()), k=len(groups))
         if balance_cardinality:
             weights = [sum(self._file_weights(groups[l])) for l in labels]
             assignment = self._assign_balanced(labels, weights, partitions, tolerance=tolerance)
         else:
             assignment = self._assign_by_ratio(labels, [1.] * len(labels), partitions)
-        return {k: sum([groups[l] for l in v], []) for k, v in assignment.items()}
+        return "files", {k: sum([groups[l] for l in v], []) for k, v in assignment.items()}
 
     def _split_from_feature(self, partition_key: str, partitions: Iterable[str]) -> Dict[str, List[int]]:
         feature_hash = self.feature_hash
@@ -975,8 +1095,14 @@ class OnlineAudioDataset(AudioDataset):
         partition_path = self._partition_path(write)
         os.makedirs(partition_path.parent, exist_ok=True)
         # files are referred with their audio_path, such that partitions are robust to dataset modifications
+        if any(v.item_subindices is not None for v in partitions.values()):
+            # partitions split by items : (audio_path, chunk index) pairs, with the loading parameters they are defined for
+            content = {'by': "items", **self._item_params(),
+                       'partitions': {p: [[self._files[f]['audio_path'], c] for f, c in v._all_items()] for p, v in partitions.items()}}
+        else:
+            content = {p: [self._files[i]['audio_path'] for i in v.file_indices] for p, v in partitions.items()}
         with open(partition_path, "w+") as f:
-            json.dump({p: [self._files[i]['audio_path'] for i in v.file_indices] for p, v in partitions.items()}, f, indent=1)
+            json.dump(content, f, indent=1)
 
     def has_partition(self, name: str) -> bool:
         return self._partition_path(name).exists()
@@ -990,11 +1116,18 @@ class OnlineAudioDataset(AudioDataset):
               tolerance: float = 0.1, 
               write: str | bool | None = None,
               seed: int | None = None,
-              n_bins: int = 10) -> Dict[str, "OnlineAudioDataset"]:
-        """splits dataset files in partitions.
+              n_bins: int = 10,
+              by: str = "auto") -> Dict[str, "OnlineAudioDataset"]:
+        """splits the dataset in partitions, by files or by items.
 
         Args:
             partitions (Dict[str, float]): partition ratios (e.g. {"train": 0.8, "valid": 0.2}).
+            by (str, optional): unit of random and stratified partitions : "files" (all the items of a file belong to the
+                same partition), "items" (items are partitioned independently ; items of a file may then be in several
+                partitions), or "auto" ("files", unless the size of a partition would deviate from its ratio by more than
+                tolerance, e.g. for datasets with few files ; then "items"). Partitions split by items are only valid for
+                the chunk_length and batch_by they were split with. Partitions grouped by path-based features are always
+                split by files. Defaults to "auto".
             features (List[str] | None, optional): path-based features (original_path, or meta_regexp features) used to group 
                 files, such that each feature value belongs to a single partition. A computed (continuous) feature can also be 
                 given (e.g. loudness) : partitions are then stratified over its values (see n_bins). Defaults to None.
@@ -1003,7 +1136,7 @@ class OnlineAudioDataset(AudioDataset):
             load_if_available (bool | str | None, optional): loads the partition with this name (or default name if True) 
                 if it exists. Defaults to False.
             balance_cardinality (bool, optional): balance partitions sizes rather than number of feature values. Defaults to False.
-            tolerance (float, optional): tolerance for balanced partitions. Defaults to 0.1.
+            tolerance (float, optional): relative tolerance on partition sizes, for balanced partitions and by="auto". Defaults to 0.1.
             write (str | bool | None, optional): writes partition with this name (or default name if True). Defaults to None.
             seed (int | None, optional): seed of random partitions ; partitions with the same seed are identical (e.g. across 
                 processes of distributed training). If None, the global random state is used. Defaults to None.
@@ -1012,6 +1145,8 @@ class OnlineAudioDataset(AudioDataset):
                 feature. Feature values are computed on the items of each file. Defaults to 10.
         """
         assert not self.is_partition, "dataset is already a partition of an existing dataset."
+        self._check_split_by(by)
+        self._check_loading_params()
         rng = random.Random(seed) if seed is not None else random
         if load_if_available:
             name = None if load_if_available is True else load_if_available
@@ -1019,22 +1154,24 @@ class OnlineAudioDataset(AudioDataset):
                 if features is not None: logging.warning("found partition to load, but features was not None; feature-based partitioning ignored")
                 return self.load_partition(name)
 
-        file_partitions = None
+        assignment = None
         if use_meta_if_available:
             partition_key = "partition" if use_meta_if_available is True else use_meta_if_available
             if partition_key in self.path_features:
-                try: 
-                    file_partitions = self._split_from_feature(partition_key, partitions.keys())
+                try:
+                    assignment = ("files", self._split_from_feature(partition_key, partitions.keys()))
                     if features is not None: logging.warning("found partition feature, but features was not None; feature-based partitioning ignored")
                 except AssertionError as e:
                     logging.warning('Could not find partition using feature %s (%s). Creating new partition'%(partition_key, e))
-        if file_partitions is None:
+        if assignment is None:
             if features is None:
-                file_partitions = self._split_without_feature(partitions, rng=rng)
+                assignment = self._split_without_feature(partitions, rng=rng, by=by, tolerance=tolerance)
             else:
-                file_partitions = self._split_with_features(partitions, checklist(features), tolerance=tolerance, balance_cardinality=balance_cardinality, rng=rng, n_bins=n_bins)
-
-        partitions = {k: self.get_subdataset(v) for k, v in file_partitions.items()}
+                assignment = self._split_with_features(partitions, checklist(features), tolerance=tolerance, balance_cardinality=balance_cardinality,
+                                                       rng=rng, n_bins=n_bins, by=by)
+        unit, assignment = assignment
+        get_subdataset = self.get_item_subdataset if unit == "items" else self.get_subdataset
+        partitions = {k: get_subdataset(v) for k, v in assignment.items()}
         if write: 
             self._write_partition(partitions, write)
         return partitions
@@ -1046,6 +1183,8 @@ class OnlineAudioDataset(AudioDataset):
         with open(partition_path, "r") as f:
             partition_paths = json.load(f)
         file_map = {f['audio_path']: i for i, f in enumerate(self._files)}
+        if partition_paths.get('by') == "items":
+            return self._load_item_partition(partition_paths, file_map, check=check)
         partitions = {}
         for p, audio_paths in partition_paths.items():
             missing = [a for a in audio_paths if a not in file_map]
@@ -1053,6 +1192,22 @@ class OnlineAudioDataset(AudioDataset):
                 if check: raise FileNotFoundError("partition %s : files %s not found in dataset"%(p, missing))
                 logging.warning("partition %s : %d files not found in dataset"%(p, len(missing)))
             partitions[p] = self.get_subdataset([file_map[a] for a in audio_paths if a in file_map])
+        return partitions
+
+    def _load_item_partition(self, content: Dict[str, Any], file_map: Dict[str, int], check: bool = False) -> Dict[str, "OnlineAudioDataset"]:
+        """loads partitions split by items, if the dataset has the loading parameters they were split with."""
+        self._check_loading_params()
+        params = {k: content.get(k) for k in self._item_params()}
+        if params != self._item_params():
+            raise ValueError("partition was split by items with %s, but dataset has %s (configure the dataset with the same "
+                             "loading parameters)"%(params, self._item_params()))
+        partitions = {}
+        for p, items in content['partitions'].items():
+            missing = sorted({a for a, _ in items if a not in file_map})
+            if len(missing) > 0:
+                if check: raise FileNotFoundError("partition %s : files %s not found in dataset"%(p, missing))
+                logging.warning("partition %s : %d files not found in dataset"%(p, len(missing)))
+            partitions[p] = self.get_item_subdataset([(file_map[a], c) for a, c in items if a in file_map], check=check)
         return partitions
 
 
@@ -1139,6 +1294,10 @@ class OnlineAudioDataset(AudioDataset):
         """writes a partition of this dataset in a pre-processed dataset, matching files by audio paths."""
         with open(self._partition_path(name), "r") as f:
             file_partitions = json.load(f)
+        if file_partitions.get('by') == "items":
+            # chunks of pre-processed datasets do not match items of online datasets
+            logging.warning("partition %s is split by items, and cannot be transferred to the pre-processed dataset (split it again)"%name)
+            return
         path_keys = dataset.feature_hash['original_path']
         partitions = {}
         for p, audio_paths in file_partitions.items():

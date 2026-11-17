@@ -644,7 +644,7 @@ def test_split(instrument_dataset, batch_by, features, balance_cardinality):
 @pytest.mark.parametrize("balance_cardinality", [False, True])
 def test_split_partial_ratios(instrument_dataset, balance_cardinality):
     ds = AudioDataset(instrument_dataset, meta_regexp=INSTRUMENT_REGEXP, chunk_length=1.)
-    partitions = ds.split({"train": 0.5, "valid": 0.2}, features=["instrument"] if balance_cardinality else None, balance_cardinality=balance_cardinality)
+    partitions = ds.split({"train": 0.5, "valid": 0.2}, features=["instrument"] if balance_cardinality else None, balance_cardinality=balance_cardinality, by="files")
     n_files = sum(len(p.file_indices) for p in partitions.values())
     assert 0 < n_files < len(ds.files)
 

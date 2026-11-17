@@ -265,7 +265,8 @@ def build_app(browser: DatasetBrowser) -> "gr.Blocks":
                     create_seed = gr.Number(value=0, precision=0, label="seed")
                 with gr.Row():
                     create_balance = gr.Checkbox(value=False, label="balance partition sizes (with features)")
-                    create_tolerance = gr.Slider(minimum=0., maximum=1., value=0.1, step=0.05, label="tolerance of balanced partitions")
+                    create_tolerance = gr.Slider(minimum=0., maximum=1., value=0.1, step=0.05, label="tolerance of balanced partitions (and of auto split)")
+                    create_by = gr.Radio(choices=["auto", "files", "items"], value="auto", label="split by (auto : files, unless partition sizes exceed tolerance)")
                     create_use_feature = gr.Checkbox(value=False, label="use 'partition' feature if available")
                 with gr.Row():
                     create_name = gr.Textbox(value="", label="name (to write the partition)")
@@ -297,11 +298,11 @@ def build_app(browser: DatasetBrowser) -> "gr.Blocks":
             return show_report(browser.partition_report(name))
         partition_button.click(show_partition, partition_name, [partition_sizes, partition_warning, partition_plot])
 
-        def create_partition(ratios, features, seed, balance, tolerance, use_feature, name, overwrite, write):
+        def create_partition(ratios, features, seed, balance, tolerance, use_feature, name, overwrite, by, write):
             try:
                 report = browser.create_partition(ratios, features=features, balance_cardinality=balance, tolerance=tolerance, 
                                                   seed=None if seed is None else int(seed), use_partition_feature=use_feature, 
-                                                  name=name if write else None, overwrite=overwrite)
+                                                  name=name if write else None, overwrite=overwrite, by=by or "auto")
             except (ValueError, FileExistsError, AssertionError) as e:
                 return "**Error** : %s"%e, gr.Dropdown(), {}, "", None
             sizes, warning, figure = show_report(report)
@@ -313,7 +314,7 @@ def build_app(browser: DatasetBrowser) -> "gr.Blocks":
                 dropdown = gr.Dropdown()
             return status, dropdown, sizes, warning, figure
 
-        create_inputs = [create_ratios, create_features, create_seed, create_balance, create_tolerance, create_use_feature, create_name, create_overwrite]
+        create_inputs = [create_ratios, create_features, create_seed, create_balance, create_tolerance, create_use_feature, create_name, create_overwrite, create_by]
         create_outputs = [create_status, partition_name, partition_sizes, partition_warning, partition_plot]
         preview_button.click(lambda *args: create_partition(*args, write=False), create_inputs, create_outputs, api_name="preview_partition")
         create_button.click(lambda *args: create_partition(*args, write=True), create_inputs, create_outputs, api_name="create_partition")

@@ -311,9 +311,9 @@ class DatasetBrowser():
 
     def create_partition(self, ratios: str | Dict[str, float], features: List[str] | None = None, balance_cardinality: bool = False, 
                          tolerance: float = 0.1, seed: int | None = 0, use_partition_feature: bool = False, 
-                         name: str | None = None, overwrite: bool = False) -> Dict[str, Any]:
-        """creates partitions with dataset.split, and writes them with the given name (if not None). Returns the 
-        report of the partitions (see partition_report)."""
+                         name: str | None = None, overwrite: bool = False, by: str = "auto") -> Dict[str, Any]:
+        """creates partitions with dataset.split (by files, items, or auto, see split), and writes them with the given name 
+        (if not None). Returns the report of the partitions (see partition_report)."""
         ratios = self.parse_ratios(ratios)
         features = [f for f in (features or []) if f]
         for f in features:
@@ -326,7 +326,7 @@ class DatasetBrowser():
             if not overwrite and name in self.list_partitions():
                 raise FileExistsError("partition %s already exists"%name)
         partitions = self.dataset.split(ratios, features=features or None, balance_cardinality=balance_cardinality, tolerance=tolerance, 
-                                        seed=seed, use_meta_if_available=use_partition_feature, write=name or None)
+                                        seed=seed, use_meta_if_available=use_partition_feature, write=name or None, by=by)
         return self.partition_report(partitions)
 
 

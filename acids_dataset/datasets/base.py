@@ -436,6 +436,32 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
     def features_after_transforms(self, value: bool) -> None:
         self._features_after_transforms = bool(value)
 
+    # partitions
+
+    split_by_modes = ("auto", "files", "items")
+
+    @classmethod
+    def _check_split_by(cls, by: str) -> str:
+        if by not in cls.split_by_modes:
+            raise ValueError("by must be in %s, got %r"%(cls.split_by_modes, by))
+        return by
+
+    @staticmethod
+    def _is_balanced(groups: List[Any], weights: List[float], assignment: Dict[str, List[Any]], ratios: Dict[str, float],
+                     tolerance: float = 0.1) -> bool:
+        """True if partition weights of an assignment follow ratios, within a relative tolerance (and no partition with a
+        positive ratio is empty)."""
+        weight_of = dict(zip(groups, weights))
+        total = sum(weights)
+        for k, r in ratios.items():
+            target = r * total
+            if target <= 0:
+                continue
+            current = sum(weight_of[g] for g in assignment.get(k, []))
+            if current <= 0 or abs(current - target) > tolerance * target:
+                return False
+        return True
+
     @staticmethod
     def _assign_by_ratio(groups: List[Any], weights: List[float], ratios: Dict[str, float]) -> Dict[str, List[Any]]:
         """assigns ordered groups to partitions such that partition weights follow ratios ; each group is 

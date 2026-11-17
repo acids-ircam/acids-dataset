@@ -30,7 +30,7 @@ def browsers(tmp_path_factory):
     AudioDataset(tmp_path / "preprocessed").split({"train": 0.7, "valid": 0.3}, features=["instrument"], seed=0, write="by_instrument")
     online = DatasetBrowser.from_path(raw, features=["loudness"], meta_regexp=META_REGEXP, chunk_length=0.5, partition_dir=tmp_path / "partitions")
     # random partition of files : files are not shared, items of a same instrument are
-    online.dataset.split({"train": 0.7, "valid": 0.3}, seed=0, write="random")
+    online.dataset.split({"train": 0.7, "valid": 0.3}, seed=0, by="files", write="random")
     return {"preprocessed": DatasetBrowser.from_path(tmp_path / "preprocessed"), "online": online}
 
 MODES = ["preprocessed", "online"]
@@ -127,7 +127,7 @@ def test_partitions(browsers, mode):
 def test_shared_files_detection(browsers):
     # random partitions of pre-processed items share files between partitions
     browser = browsers["preprocessed"]
-    browser.dataset.split({"train": 0.5, "valid": 0.5}, seed=0, write="random_items")
+    browser.dataset.split({"train": 0.5, "valid": 0.5}, seed=0, by="items", write="random_items")
     report = browser.partition_report("random_items")
     assert len(report['shared_files']) == 1 and len(report['shared_files']["train / valid"]) > 0
 

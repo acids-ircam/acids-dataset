@@ -115,6 +115,7 @@ class OnlineAudioDataset(AudioDataset):
                  max_samples: int | None = None,
                  features_after_transforms: bool = True,
                  float_dtype: torch.dtype | str | None = "float32",
+                 shuffle_idx: bool | int | None = None,
                  **kwargs) -> None:
         """
         Args:
@@ -146,6 +147,10 @@ class OnlineAudioDataset(AudioDataset):
             bformat (str, optional): audio format of loaded fragments. Defaults to "float32".
             float_dtype (torch.dtype | str | None, optional): dtype of floating point outputs (waveforms, features...), e.g.
                 torch.float32 or "float16" ; None keeps loaded dtypes. Defaults to "float32".
+            shuffle_idx (bool | int | None, optional): persistent random permutation of item indices : an int is the seed of 
+                the permutation (reproducible across sessions), True draws a random seed. Can also be set 
+                afterwards (shuffle_idx property, or configure). The permutation is the same in every worker and epoch. 
+                Defaults to None.
             rescan (bool, optional): ignore existing index files and re-scan every file. Defaults to False.
             write_index (bool, optional): write index files after scanning. Defaults to True.
         """
@@ -158,7 +163,7 @@ class OnlineAudioDataset(AudioDataset):
             raise ValueError("dataset folders must have distinct names, got %s"%self._paths)
         self._init_common(transforms=transforms, output_pattern=output_pattern, output_type=output_type, 
                           channels=channels, max_samples=max_samples, features_after_transforms=features_after_transforms,
-                          float_dtype=float_dtype)
+                          float_dtype=float_dtype, shuffle_idx=shuffle_idx)
         self._index_dir = None if index_dir is None else Path(index_dir).resolve()
         self._partition_dir = None if partition_dir is None else Path(partition_dir).resolve()
         self._filters = checklist(filters)
@@ -457,23 +462,20 @@ class OnlineAudioDataset(AudioDataset):
     def _fragment_from_index(self, index):
         return self._fragment_from_audio(*self._load_chunk(index))
 
-    def get(self, index, output_pattern=None, transforms=None, _global_index=None):
-        """returns the item at index (see AudioDataset.get). If features_after_transforms (default), features are computed
-        on the augmented audio, i.e. on the waveform output after its transforms (see batch.augmented_audio_entry) ; other
-        waveform entries (e.g. clean targets) are given without the transforms of this entry. Otherwise, features are
+    def _get_item(self, index, output_pattern=None, transforms=None, item_index=None):
+        """returns the item at internal index (see AudioDataset.get). If features_after_transforms (default), features are
+        computed on the augmented audio, i.e. on the waveform output after its transforms (see batch.augmented_audio_entry) ;
+        other waveform entries (e.g. clean targets) are given without the transforms of this entry. Otherwise, features are
         computed on loaded audio, before transforms."""
         transforms = transforms or self.transforms
-        if is_multi_index(index) or transforms is None or len(self._features) == 0 or not self.features_after_transforms:
-            return super().get(index, output_pattern=output_pattern, transforms=transforms, _global_index=_global_index)
+        if transforms is None or len(self._features) == 0 or not self.features_after_transforms:
+            return super()._get_item(index, output_pattern=output_pattern, transforms=transforms, item_index=item_index)
         kind, entries = parse_output_pattern(output_pattern or self.output_pattern)
         entry_transforms = transforms_per_entry(kind, entries, transforms)
         audio_entry = augmented_audio_entry(entries, entry_transforms)
         if audio_entry is None or entry_transforms[audio_entry] is None:
             # no audio augmentation : features are computed on loaded audio
-            return super().get(index, output_pattern=output_pattern, transforms=transforms, _global_index=_global_index)
-        if hasattr(index, "item") and not isinstance(index, (str, bytes)):
-            index = index.item()
-        item_index = _global_index if _global_index is not None else (index % len(self) if isinstance(index, int) else None)
+            return super()._get_item(index, output_pattern=output_pattern, transforms=transforms, item_index=item_index)
         file_idx, start, wav = self._load_chunk(index)
         clean = self._fragment_from_audio(file_idx, start, wav, features=[])
         audio = _entry_from_fragment(clean, entries[audio_entry][0], item_index)
@@ -515,7 +517,7 @@ class OnlineAudioDataset(AudioDataset):
         from ..utils import loudness
         return float(loudness(wav[..., :5, :] if wav.shape[-2] > 5 else wav, self.sr))
 
-    def item_labels(self, features, n_bins: int = 10):
+    def _item_labels(self, features, n_bins: int = 10):
         """labels of items : values of path-based features of their files, and histogram bins of computed features 
         (averaged over the items of each file, see _file_feature_mean)."""
         from ..sampling import bin_values

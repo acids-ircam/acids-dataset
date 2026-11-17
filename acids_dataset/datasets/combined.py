@@ -30,6 +30,7 @@ class CombinedAudioDataset(AudioDataset):
                  path: List[str | Path] | None = None,
                  features_after_transforms: bool | None = None,
                  float_dtype: torch.dtype | str | None = None,
+                 shuffle_idx: bool | int | None = None,
                  **dataset_kwargs: Any):
         """
         Args:
@@ -43,6 +44,8 @@ class CombinedAudioDataset(AudioDataset):
                 datasets (True by default). Defaults to None.
             float_dtype (torch.dtype | str | None, optional): dtype of floating point outputs of every dataset ; None keeps
                 the setting of each dataset. Defaults to None.
+            shuffle_idx (bool | int | None, optional): persistent random permutation of the items of the combined dataset
+                (see OnlineAudioDataset). Defaults to None.
             **dataset_kwargs: arguments of datasets given as paths.
         """
         # path is an alias of datasets (see AudioDataset)
@@ -63,7 +66,8 @@ class CombinedAudioDataset(AudioDataset):
             assert all(w >= 0 for w in weights) and sum(weights) > 0, "weights must be positive"
         self._init_common(transforms=transforms, output_pattern=datasets[0]._output_pattern, output_type=datasets[0]._output_type,
                           channels=datasets[0]._n_channels, max_samples=max_samples, 
-                          features_after_transforms=datasets[0].features_after_transforms, float_dtype=float_dtype)
+                          features_after_transforms=datasets[0].features_after_transforms, float_dtype=float_dtype,
+                          shuffle_idx=shuffle_idx)
         self._weights = weights
         self._datasets = datasets
         self._dataset_map = cumsum([len(d) for d in self._datasets])
@@ -111,15 +115,19 @@ class CombinedAudioDataset(AudioDataset):
 
     def _fragment_from_index(self, index):
         target_dataset, index = self._locate(index)
-        return self._datasets[target_dataset]._fragment_from_index(index)
+        dataset = self._datasets[target_dataset]
+        # indices of combined datasets are their public indices (see get)
+        return dataset._fragment_from_index(dataset._shuffled_index(index))
 
     def get(self, index, output_pattern=None, transforms=None):
         """returns the item at index, with the output pattern and transforms of its dataset (unless given, or
         unless the combined dataset has transforms). Slices and sequences of indices return batches."""
         if is_multi_index(index):
             return collate_items([self.get(i, output_pattern=output_pattern, transforms=transforms) for i in multi_index_to_list(index, len(self))])
-        global_index = int(index.item() if hasattr(index, "item") else index) % max(1, len(self))
-        target_dataset, index = self._locate(index)
+        index = int(index.item() if hasattr(index, "item") else index)
+        global_index = index % max(1, len(self))
+        # out of range indices raise IndexError (in _shuffled_index or _locate)
+        target_dataset, index = self._locate(self._shuffled_index(index))
         dataset = self._datasets[target_dataset]
         if transforms is None:
             transforms = self._transforms if self._transforms is not None else dataset.transforms
@@ -140,9 +148,12 @@ class CombinedAudioDataset(AudioDataset):
     def configure(self, **kwargs) -> "CombinedAudioDataset":
         """returns a combined dataset of configured datasets (e.g. chunk_length of online datasets). Loading arguments
         that do not apply to a dataset (e.g. batch_by for pre-processed datasets) are ignored for this dataset."""
+        # shuffle_idx applies to the combined dataset, not to the combined datasets
+        shuffle_idx = kwargs.pop('shuffle_idx', None)
+        dataset = super().configure(shuffle_idx=shuffle_idx) if shuffle_idx is not None else self
         if len(kwargs) == 0:
-            return self
-        dataset = copy.copy(self)
+            return dataset
+        dataset = copy.copy(dataset)
         if kwargs.get('features_after_transforms') is not None:
             dataset._features_after_transforms = bool(kwargs['features_after_transforms'])
         dataset._datasets = [self._configure_dataset(d, kwargs) for d in self._datasets]
@@ -162,7 +173,7 @@ class CombinedAudioDataset(AudioDataset):
         for d in self._datasets:
             d._check_loader_arguments(batch_size, loader_kwargs)
 
-    def item_labels(self, features, n_bins: int = 10):
+    def _item_labels(self, features, n_bins: int = 10):
         """labels of items of each dataset, as (dataset index, label) ; None for items without label."""
         labels = []
         for i, d in enumerate(self._datasets):
@@ -182,7 +193,7 @@ class CombinedAudioDataset(AudioDataset):
             else:
                 item_weights = torch.full((len(d),), 1. / max(1, len(d)), dtype=torch.float64)
             weights.append(item_weights * (w / norm))
-        return torch.cat(weights)
+        return self._permute_items(torch.cat(weights))
 
     def get_sampler(self, replacement: bool | None = None, max_samples: int | None = None, valid: bool = False, balance_by=None, 
                     balance_power: float = 1., n_bins: int = 10, missing: str = "exclude", curriculum=None, weights=None, 

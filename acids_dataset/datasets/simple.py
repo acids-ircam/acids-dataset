@@ -61,6 +61,7 @@ class PreprocessedAudioDataset(AudioDataset):
                  db_path: str | None = None,
                  features_after_transforms: bool = True,
                  float_dtype: torch.dtype | str | None = "float32",
+                 shuffle_idx: bool | int | None = None,
                  **kwargs) -> None:
         # db_path kept for retro-compatibility
         path = path or db_path
@@ -71,7 +72,8 @@ class PreprocessedAudioDataset(AudioDataset):
             raise NotImplementedError()
         self._init_common(transforms=transforms, output_pattern=output_pattern, output_type=output_type, 
                           channels=channels, subindices=subindices, max_samples=max_samples,
-                          features_after_transforms=features_after_transforms, float_dtype=float_dtype)
+                          features_after_transforms=features_after_transforms, float_dtype=float_dtype,
+                          shuffle_idx=shuffle_idx)
         self._loader = get_writer_class_from_path(path).loader(self._db_path, output_type=output_type) 
         self._metadata = get_metadata_from_path(path)
         self._set_sr(sr)
@@ -352,7 +354,7 @@ class PreprocessedAudioDataset(AudioDataset):
         subindices = {k: list(map(lambda x: self._loader._keys[x], subindices[k])) for k in subindices}
         return {k: self.get_subdataset(subindices[k]) for k in ratios.keys()}           
 
-    def item_labels(self, features, n_bins: int = 10):
+    def _item_labels(self, features, n_bins: int = 10):
         from ..sampling import bin_values
         keys = self._subindices if self._subindices is not None else self._loader._keys
         keys = [self._key_to_str(k) for k in keys]

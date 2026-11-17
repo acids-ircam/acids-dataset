@@ -276,7 +276,10 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
                      subindices = None,
                      max_samples: int | None = None,
                      features_after_transforms: bool = True,
-                     float_dtype = "float32") -> None:
+                     float_dtype = "float32",
+                     shuffle_idx: bool | int | None = None) -> None:
+        self._shuffle_seed = self._parse_shuffle_idx(shuffle_idx)
+        self._shuffle_perm = None
         self._transforms = transforms
         self._float_dtype = parse_float_dtype(float_dtype)
         self._features_after_transforms = bool(features_after_transforms)
@@ -287,6 +290,65 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
         self._max_samples = max_samples
         self._parent = None
         self._partitions = {}
+
+    # persistent index shuffling
+
+    @staticmethod
+    def _parse_shuffle_idx(shuffle_idx: bool | int | None) -> int | None:
+        """seed of the index permutation : None / False for no shuffling, an int for a given seed, True for a random seed."""
+        if shuffle_idx is None or shuffle_idx is False:
+            return None
+        if shuffle_idx is True:
+            return random.SystemRandom().randrange(2 ** 32)
+        if isinstance(shuffle_idx, (int, np.integer)):
+            return int(shuffle_idx)
+        raise TypeError("shuffle_idx must be a bool, an int (seed) or None, got %r"%(shuffle_idx,))
+
+    @property
+    def shuffle_idx(self) -> int | None:
+        """seed of the persistent index permutation, None if items are not shuffled. Can be set with a bool / int / None
+        (True draws a random seed) ; the seed can be given again to get the same item order in another session. Setting
+        it only affects this dataset object (e.g. not partitions already split from it ; see also configure)."""
+        return getattr(self, "_shuffle_seed", None)
+
+    @shuffle_idx.setter
+    def shuffle_idx(self, value: bool | int | None) -> None:
+        self._shuffle_seed = self._parse_shuffle_idx(value)
+        self._shuffle_perm = None
+
+    def _index_permutation(self) -> np.ndarray | None:
+        """persistent permutation of items : a deterministic function of (shuffle_idx, len(self)), such that it is
+        identical across workers, epochs and processes, and follows changes of length (e.g. chunk_length, partitions)."""
+        seed = self.shuffle_idx
+        if seed is None:
+            return None
+        n = len(self)
+        perm = getattr(self, "_shuffle_perm", None)
+        if perm is None or len(perm) != n:
+            perm = np.random.default_rng(seed).permutation(n)
+            self._shuffle_perm = perm
+        return perm
+
+    def _shuffled_index(self, index):
+        """maps a public item index to the internal item index (identity without shuffle_idx). Keys (str / bytes)
+        are not mapped."""
+        perm = self._index_permutation()
+        if perm is None or not isinstance(index, (int, np.integer)):
+            return index
+        n = len(perm)
+        if index < 0: index += n
+        if not (0 <= index < n):
+            raise IndexError("index %d out of range for dataset of length %d"%(index, n))
+        return int(perm[index])
+
+    def _permute_items(self, values):
+        """reorders per-item values (internal order) to public item order."""
+        perm = self._index_permutation()
+        if perm is None:
+            return values
+        if torch.is_tensor(values):
+            return values[torch.as_tensor(perm, dtype=torch.long)]
+        return [values[i] for i in perm]
 
     # abstract methods
 
@@ -348,15 +410,19 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
     def load_partition(self, name: str | None, check: bool = False):
         raise NotImplementedError()
 
-    def configure(self, features_after_transforms: bool | None = None, **kwargs) -> "AudioDataset":
-        """returns a dataset configured with given loading parameters (e.g. chunk_length, features_after_transforms)."""
+    def configure(self, features_after_transforms: bool | None = None, shuffle_idx: bool | int | None = None, **kwargs) -> "AudioDataset":
+        """returns a dataset configured with given loading parameters (e.g. chunk_length, features_after_transforms,
+        shuffle_idx ; None keeps the current value, False removes index shuffling)."""
         if len(kwargs) > 0:
             raise TypeError("%s got unexpected loading arguments : %s"%(type(self).__name__, list(kwargs.keys())))
-        if features_after_transforms is None or bool(features_after_transforms) == self.features_after_transforms:
+        change_features = features_after_transforms is not None and bool(features_after_transforms) != self.features_after_transforms
+        change_shuffle = shuffle_idx is not None and (shuffle_idx is True or self._parse_shuffle_idx(shuffle_idx) != self.shuffle_idx)
+        if not (change_features or change_shuffle):
             return self
         import copy
         dataset = copy.copy(self)
-        dataset.features_after_transforms = features_after_transforms
+        if change_features: dataset.features_after_transforms = features_after_transforms
+        if change_shuffle: dataset.shuffle_idx = shuffle_idx
         return dataset
 
     @property
@@ -484,11 +550,15 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
         if hasattr(index, "item") and not isinstance(index, (str, bytes)):
             # 0-d tensors / numpy integers
             index = index.item()
+        # "index" entries of output patterns give the (public) index of the item (in combined datasets if any)
+        item_index = _global_index if _global_index is not None else (index % len(self) if isinstance(index, int) else None)
+        return self._get_item(self._shuffled_index(index), output_pattern=output_pattern, transforms=transforms, item_index=item_index)
+
+    def _get_item(self, index, output_pattern=None, transforms=None, item_index=None):
+        """returns the item at internal index (after the persistent permutation of shuffle_idx)."""
         output_pattern = output_pattern or self.output_pattern
         transforms = transforms or self.transforms
         fg = self._fragment_from_index(index)
-        # "index" entries of output patterns give the index of the item (in combined datasets if any)
-        item_index = _global_index if _global_index is not None else (index % len(self) if isinstance(index, int) else None)
         outs = _outs_from_pattern(fg, output_pattern, index=item_index)
         outs = _transform_outputs(outs, transforms, self._n_channels)
         return self._cast_outputs(outs)
@@ -498,8 +568,13 @@ class AudioDataset(torch.utils.data.Dataset, metaclass=_AudioDatasetMeta):
         return _cast_floats(outs, getattr(self, "_float_dtype", None))
 
     def item_labels(self, features, n_bins: int = 10) -> List[Any]:
-        """label of each item for given features : values of categorical (hashed) features, and histogram (quantile) 
-        bins of continuous features, as tuples for several features ; None for items without value."""
+        """label of each item for given features : values of categorical (hashed) features, and histogram (quantile)
+        bins of continuous features, as tuples for several features ; None for items without value. Labels follow
+        item indices (i.e. the permutation of shuffle_idx, if any)."""
+        return self._permute_items(self._item_labels(features, n_bins=n_bins))
+
+    def _item_labels(self, features, n_bins: int = 10) -> List[Any]:
+        """labels of items, in internal order (see item_labels)."""
         raise NotImplementedError("%s does not give item labels"%type(self).__name__)
 
     @staticmethod
